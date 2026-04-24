@@ -1,0 +1,37 @@
+definitions:
+  server.Event:
+    properties:
+      message:
+        type: string
+      title:
+        type: string
+      type:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /events:
+    post:
+      consumes:
+      - application/json
+      description: Log an event
+      operationId: log-event
+      parameters:
+      - description: Log Entry
+        in: body
+        name: entry
+        required: true
+        schema:
+          $ref: '#/definitions/server.Event'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Log an event
+swagger: "2.0"
