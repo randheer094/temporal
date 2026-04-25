@@ -19,7 +19,11 @@ var runCmd = &cobra.Command{
 			log.Fatal("Could not get user's home directory:", err)
 		}
 		logDir := filepath.Join(home, ".temporal")
-		a := api.NewAPI(logDir)
+		a, err := api.NewAPI(logDir)
+		if err != nil {
+			log.Fatal("Failed to start API:", err)
+		}
+		defer a.Close()
 		a.Run()
 	},
 }

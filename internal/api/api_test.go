@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +22,10 @@ func TestLogEventHandler(t *testing.T) {
 		t.Fatal("Failed to create test directory:", err)
 	}
 
-	a := NewAPI(testDir)
+	a, err := NewAPI(testDir)
+	if err != nil {
+		t.Fatal("Failed to create API:", err)
+	}
 
 	// Create a test log entry
 	entry := Event{
@@ -37,6 +41,9 @@ func TestLogEventHandler(t *testing.T) {
 
 	// Call the handler
 	a.logEventHandler(rr, req)
+
+	// Flush queued writes before reading the file.
+	a.Close()
 
 	// Check the status code
 	if status := rr.Code; status != http.StatusOK {
@@ -88,5 +95,77 @@ func TestLogEventHandler(t *testing.T) {
 				t.Errorf("Timestamp is not in the correct format: %v", err)
 			}
 		}
+	}
+}
+
+func TestLogEventHandlerWritesDaemonLog(t *testing.T) {
+	dir := t.TempDir()
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal("Failed to create API:", err)
+	}
+
+	body, _ := json.Marshal(Event{Type: "t", Title: "ti", Message: "m"})
+	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
+	a.logEventHandler(httptest.NewRecorder(), req)
+
+	a.Close()
+
+	content, err := os.ReadFile(filepath.Join(dir, "daemon.log"))
+	if err != nil {
+		t.Fatal("Failed to read daemon log:", err)
+	}
+	if !strings.Contains(string(content), "Received request on /events") {
+		t.Errorf("daemon log missing expected entry: %q", string(content))
+	}
+}
+
+func TestLogEventHandlerPreservesOrder(t *testing.T) {
+	dir := t.TempDir()
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal("Failed to create API:", err)
+	}
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		body, _ := json.Marshal(Event{Type: "t", Title: fmt.Sprintf("title-%d", i), Message: "m"})
+		req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
+		a.logEventHandler(httptest.NewRecorder(), req)
+	}
+	a.Close()
+
+	content, err := os.ReadFile(filepath.Join(dir, "events.log"))
+	if err != nil {
+		t.Fatal("Failed to read events log:", err)
+	}
+	got := string(content)
+	prev := -1
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(line, "title-") {
+			continue
+		}
+		var idx int
+		if _, err := fmt.Sscanf(line, "title-%d", &idx); err != nil {
+			t.Fatalf("could not parse title line %q: %v", line, err)
+		}
+		if idx != prev+1 {
+			t.Fatalf("out-of-order entry: got title-%d after title-%d", idx, prev)
+		}
+		prev = idx
+	}
+	if prev != n-1 {
+		t.Fatalf("expected %d entries, last seen title-%d", n, prev)
+	}
+}
+
+func TestNewAPIErrorsOnBadLogDir(t *testing.T) {
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "file")
+	if err := os.WriteFile(notADir, []byte("x"), 0644); err != nil {
+		t.Fatal("seed failed:", err)
+	}
+	if _, err := NewAPI(filepath.Join(notADir, "child")); err == nil {
+		t.Fatal("expected error, got nil")
 	}
 }
