@@ -20,7 +20,7 @@ var startCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(startCmd)
+	serverCmd.AddCommand(startCmd)
 }
 
 func startServer() {
@@ -42,7 +42,7 @@ func startServer() {
 	procAttr := &os.ProcAttr{
 		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
 	}
-	process, err := os.StartProcess(executable, []string{executable, "run-server"}, procAttr)
+	process, err := os.StartProcess(executable, []string{executable, "server", "run"}, procAttr)
 	if err != nil {
 		log.Fatal("Failed to start server:", err)
 	}

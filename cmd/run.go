@@ -9,9 +9,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var runServerCmd = &cobra.Command{
-	Use:   "run-server",
-	Short: "Run the temporal daemon in the foreground",
+var runCmd = &cobra.Command{
+	Use:    "run",
+	Short:  "Run the temporal daemon in the foreground",
 	Hidden: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		home, err := os.UserHomeDir()
@@ -25,5 +25,5 @@ var runServerCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(runServerCmd)
+	serverCmd.AddCommand(runCmd)
 }

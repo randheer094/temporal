@@ -9,8 +9,8 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "temporal",
-	Short: "A simple daemon for logging events.",
-	Long:  `A simple daemon for logging events. You can start, stop, and check the status of the server.`,
+	Short: "Temporal CLI toolkit",
+	Long:  `Temporal is a CLI toolkit. It currently includes the temporal event-logging server, accessible under the "server" subcommand.`,
 }
 
 func Execute() {

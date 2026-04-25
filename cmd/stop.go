@@ -21,7 +21,7 @@ var stopCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(stopCmd)
+	serverCmd.AddCommand(stopCmd)
 }
 
 func stopServer() {
