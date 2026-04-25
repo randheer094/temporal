@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"temporal/internal/server"
+	"temporal/internal/api"
 
 	"github.com/spf13/cobra"
 )
@@ -19,8 +19,8 @@ var runServerCmd = &cobra.Command{
 			log.Fatal("Could not get user's home directory:", err)
 		}
 		logDir := filepath.Join(home, ".temporal")
-		s := server.NewServer(logDir)
-		s.Run()
+		a := api.NewAPI(logDir)
+		a.Run()
 	},
 }
 

@@ -1,4 +1,4 @@
-package server
+package api
 
 import (
 	"encoding/json"
@@ -25,8 +25,8 @@ type Event struct {
 // @version 1.0
 // @description API for the Temporal event logger
 // @BasePath /
-func (s *Server) logEventHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.logDaemon("Received request on /events"); err != nil {
+func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
+	if err := a.logDaemon("Received request on /events"); err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -35,7 +35,7 @@ func (s *Server) logEventHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logFile := filepath.Join(s.logDir, "events.log")
+	logFile := filepath.Join(a.logDir, "events.log")
 
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -70,12 +70,12 @@ func (s *Server) logEventHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-type Server struct {
+type API struct {
 	logDir string
 }
 
-func NewServer(logDir string) *Server {
-	return &Server{logDir: logDir}
+func NewAPI(logDir string) *API {
+	return &API{logDir: logDir}
 }
 
 // @Summary Log an event
@@ -86,26 +86,26 @@ func NewServer(logDir string) *Server {
 // @Param   entry     body    Event     true        "Log Entry"
 // @Success 200 {object} map[string]string
 // @Router /events [post]
-func (s *Server) Run() {
+func (a *API) Run() {
 	docs.SwaggerInfo.BasePath = "/"
-	http.HandleFunc("/events", s.logEventHandler)
+	http.HandleFunc("/events", a.logEventHandler)
 	http.HandleFunc("/api/docs/", httpSwagger.Handler(
 		httpSwagger.URL("http://localhost:8005/swagger/doc.json"), //The url pointing to API definition
 	))
 
-	if err := s.logDaemon("Server starting on port 8005..."); err != nil {
+	if err := a.logDaemon("Server starting on port 8005..."); err != nil {
 		log.Fatal("Failed to start logging:", err)
 	}
 	if err := http.ListenAndServe(":8005", nil); err != nil {
-		if err := s.logDaemon(fmt.Sprintf("Server failed to start: %v", err)); err != nil {
+		if err := a.logDaemon(fmt.Sprintf("Server failed to start: %v", err)); err != nil {
 			log.Fatal("Failed to start logging:", err)
 		}
 		log.Fatal("Server failed to start:", err)
 	}
 }
 
-func (s *Server) logDaemon(message string) error {
-	logFile := filepath.Join(s.logDir, "daemon.log")
+func (a *API) logDaemon(message string) error {
+	logFile := filepath.Join(a.logDir, "daemon.log")
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

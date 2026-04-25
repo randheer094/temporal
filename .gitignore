@@ -1,1 +1,23 @@
 .claude/settings.local.json
+
+# Binaries for programs and plugins
+*.exe
+*.darwin
+*.linux
+*.windows
+
+# Test binary, generated with `go test -c`
+*.test
+
+# Work files that may be created by some IDEs
+.idea/
+.vscode/
+
+# Dependency directories
+vendor/
+
+# Log files
+*.log
+
+# Test output
+test_output/

@@ -1,4 +1,4 @@
-package server
+package api
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ func TestLogEventHandler(t *testing.T) {
 		t.Fatal("Failed to create test directory:", err)
 	}
 
-	s := NewServer(testDir)
+	a := NewAPI(testDir)
 
 	// Create a test log entry
 	entry := Event{
@@ -36,7 +36,7 @@ func TestLogEventHandler(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	// Call the handler
-	s.logEventHandler(rr, req)
+	a.logEventHandler(rr, req)
 
 	// Check the status code
 	if status := rr.Code; status != http.StatusOK {
