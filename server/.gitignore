@@ -1,0 +1,31 @@
+# Binaries for programs and plugins
+*.exe
+*.darwin
+*.linux
+*.windows
+
+# Test binary, generated with `go test -c`
+*.test
+
+# Output of the go toolchain, e.g. for module builds
+#       gobin
+#       go.out
+#       go.build
+#       go.run
+#       go.mod
+#       go.sum
+#       go.work
+#       go.work.sum
+#
+# Work files that may be created by some IDEs
+.idea/
+.vscode/
+
+# Dependency directories
+vendor/
+
+# Log files
+*.log
+
+# Test output
+test_output/
