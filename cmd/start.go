@@ -31,6 +31,10 @@ func startServer() {
 	logDir := filepath.Join(home, ".temporal")
 	pidFile := filepath.Join(logDir, "daemon.pid")
 
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Fatal("Failed to create log directory:", err)
+	}
+
 	// Check if the process is already running
 	if _, err := os.Stat(pidFile); err == nil {
 		fmt.Println("Server is already running.")

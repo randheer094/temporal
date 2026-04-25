@@ -87,6 +87,9 @@ func NewAPI(logDir string) *API {
 // @Success 200 {object} map[string]string
 // @Router /events [post]
 func (a *API) Run() {
+	if err := os.MkdirAll(a.logDir, 0755); err != nil {
+		log.Fatal("Failed to create log directory:", err)
+	}
 	docs.SwaggerInfo.BasePath = "/"
 	http.HandleFunc("/events", a.logEventHandler)
 	http.HandleFunc("/api/docs/", httpSwagger.Handler(
