@@ -1,0 +1,29 @@
+# Analytics ingestion example — log every hit whose eventAction equals
+# "offer_details.clicked" out of a Proxyman-forwarded analytics POST.
+#
+# Three things tripped up the original draft of this rule:
+#
+#  1. The `each` value contains literal double quotes (around the gjson
+#     LIKE pattern). YAML can't parse double-quoted strings that themselves
+#     contain double quotes, so the *whole* rules.yaml fails to load and
+#     every event silently drops with `no_match`. Wrap with single quotes.
+#
+#  2. Proxyman forwards put the request payload under `request.body.*`,
+#     so the array lives at `request.body.hits`, not top-level `hits`.
+#
+#  3. Inside `each`, every matched element becomes the rendering context.
+#     A hit looks like {"eventVariables": {...}}, so templates need the
+#     `eventVariables.` prefix (and the title needs to be a placeholder,
+#     not the literal word "eventAction").
+rules:
+  - name: analytics_events
+    match:
+      host: perseus-stg.deliveryhero.net
+      path: /v1/insert/pandora/hits
+    each: 'request.body.hits.#(eventVariables.eventAction%"offer_details.clicked")#'
+    extract:
+      type: "analytics_events"
+      title: "{eventVariables.eventAction}"
+      message:
+        - "screenName {eventVariables.screenName}"
+        - "screenType {eventVariables.screenType}"
