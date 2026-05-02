@@ -2,20 +2,36 @@
 
 Temporal is a CLI toolkit, written in Go. It currently ships with an event-logging server, accessible under the `server` subcommand. More commands will be added over time.
 
-## Installation
+## Install
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository_url>
-    cd temporal
-    ```
+Both paths land the `temporal` binary in `~/.local/bin`. Make sure that directory is on `PATH`.
 
-2.  **Build and install:**
-    ```bash
-    make build
-    make install
-    ```
-    Compiles the `temporal` binary and installs it to `~/.local/bin/`. Ensure `~/.local/bin` is on your `PATH`.
+### From a release (recommended)
+
+Pick the asset for your Mac and curl it straight into `~/.local/bin`:
+
+```bash
+mkdir -p ~/.local/bin
+
+# Apple Silicon (arm64)
+curl -L -o ~/.local/bin/temporal \
+  https://github.com/randheer094/temporal/releases/latest/download/temporal-macos-arm64
+
+# Intel Mac (x86_64)
+curl -L -o ~/.local/bin/temporal \
+  https://github.com/randheer094/temporal/releases/latest/download/temporal-macos-x86_64
+
+chmod +x ~/.local/bin/temporal
+```
+
+### From source
+
+```bash
+git clone https://github.com/randheer094/temporal.git
+cd temporal
+make install        # builds, then moves binary to ~/.local/bin
+temporal version
+```
 
 ## `temporal`
 
