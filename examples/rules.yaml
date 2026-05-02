@@ -1,0 +1,62 @@
+# Example rules.yaml — copy to ~/.temporal/rules.yaml.
+#
+# Each incoming POST /events body is checked against these rules in order.
+# The first match wins. Match fields are all optional except path. Templates
+# use {gjson.path} placeholders against the request body; missing paths
+# render as empty strings.
+#
+# `each` (optional) is a gjson path to a nested array. When set, the rule
+# fans out: each matched element becomes the body for one log entry. Use
+# gjson query syntax to filter, e.g. items.#(name%"*alert*")#
+#
+# `message` may be a single string or a list of strings (rendered as
+# multiple lines in the log entry).
+
+rules:
+  # Log every successful login attempt forwarded by Proxyman onResponse.
+  - name: user_login
+    match:
+      host: api.example.com
+      path: /api/login
+      method: POST
+      status: "2xx"
+    extract:
+      type: "user_action"
+      title: "Login OK: {request.body.user.name}"
+      message:
+        - "ip={request.headers.X-Forwarded-For}"
+        - "ua={request.headers.User-Agent}"
+
+  # Capture all server errors under /api/* regardless of method.
+  - name: api_error
+    match:
+      path: /api/*
+      status: "5xx"
+    extract:
+      type: "error"
+      title: "{response.statusCode} {request.method} {request.path}"
+      message: "{response.body.error}"
+
+  # Fan-out + filter: emit one event per cart item whose name contains
+  # "alert", regardless of how many other items the cart has.
+  - name: cart_alerts
+    match:
+      path: /api/cart
+    each: 'items.#(name%"*alert*")#'
+    extract:
+      type: "cart_alert"
+      title: "{name}"
+      message:
+        - "qty {qty}"
+        - "id {id}"
+
+  # Generic onRequest log — fires when a payload has no response.
+  # No `status` constraint, so it matches request-only forwards too.
+  - name: api_request
+    match:
+      host: api.example.com
+      path: /api/*
+    extract:
+      type: "request"
+      title: "{request.method} {request.path}"
+      message: "{request.body}"

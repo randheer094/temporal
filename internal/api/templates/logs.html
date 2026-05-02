@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Temporal · Logs</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <header class="sticky top-0 z-10 bg-white/90 backdrop-blur border-b border-slate-200">
+    <div class="max-w-5xl mx-auto px-4 py-3 space-y-2">
+      <div class="flex flex-col sm:flex-row sm:items-center gap-3">
+        <h1 class="text-lg font-semibold flex items-center gap-2">
+          <span class="inline-block w-2 h-2 rounded-full bg-emerald-500"></span>
+          Temporal Logs
+        </h1>
+        <div class="flex flex-1 flex-wrap items-center gap-2">
+          <input id="filter-q" type="search" placeholder="Search title…"
+            class="border border-slate-300 rounded px-2 py-1 text-sm bg-white flex-1 min-w-[12ch]" />
+          <label class="flex items-center gap-2 text-sm">
+            <span class="text-slate-500">Type</span>
+            <select id="filter-type" class="border border-slate-300 rounded px-2 py-1 text-sm bg-white">
+              <option value="">All</option>
+            </select>
+          </label>
+          <label class="flex items-center gap-2 text-sm">
+            <span class="text-slate-500">Per page</span>
+            <select id="filter-size" class="border border-slate-300 rounded px-2 py-1 text-sm bg-white">
+              <option>20</option>
+              <option selected>50</option>
+              <option>100</option>
+              <option>200</option>
+            </select>
+          </label>
+          <label class="flex items-center gap-2 text-sm ml-auto">
+            <input id="auto-refresh" type="checkbox" class="rounded border-slate-300" />
+            <span class="text-slate-500">Auto-refresh (3s)</span>
+          </label>
+          <button id="refresh" class="text-sm px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-700">Refresh</button>
+          <button id="clear" class="text-sm px-3 py-1 rounded border border-rose-300 text-rose-700 bg-white hover:bg-rose-50">Delete all</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-4 py-4">
+    <div id="meta" class="text-xs text-slate-500 mb-3"></div>
+    <ul id="entries" class="space-y-3"></ul>
+    <div id="empty" class="hidden text-center py-12 text-slate-500">No log entries match.</div>
+
+    <nav class="mt-6 flex items-center justify-center gap-2" id="pager"></nav>
+  </main>
+
+  <script>
+    const state = { page: 1, size: 50, type: "", q: "" };
+    let timer = null;
+    let qTimer = null;
+
+    const $ = (sel) => document.querySelector(sel);
+
+    function escapeHTML(s) {
+      return s.replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[c]));
+    }
+
+    function badgeClass(type) {
+      const palette = ["bg-sky-100 text-sky-800", "bg-violet-100 text-violet-800",
+        "bg-emerald-100 text-emerald-800", "bg-amber-100 text-amber-800",
+        "bg-rose-100 text-rose-800", "bg-slate-200 text-slate-800"];
+      let h = 0;
+      for (const c of type) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+      return palette[h % palette.length];
+    }
+
+    function renderEntries(entries) {
+      const ul = $("#entries");
+      ul.innerHTML = "";
+      if (!entries.length) {
+        $("#empty").classList.remove("hidden");
+        return;
+      }
+      $("#empty").classList.add("hidden");
+      for (const e of entries) {
+        const li = document.createElement("li");
+        li.className = "bg-white rounded-lg border border-slate-200 shadow-sm p-3 sm:p-4 relative group";
+        const messages = Array.isArray(e.message) ? e.message : (e.message ? [e.message] : []);
+        const messagesHTML = messages.length
+          ? `<ul class="text-sm text-slate-700 mt-1 space-y-1 list-disc list-inside marker:text-slate-400">${
+              messages.map((m) => `<li class="whitespace-pre-wrap break-words">${escapeHTML(m)}</li>`).join("")
+            }</ul>`
+          : "";
+        const idAttr = e.id ? ` data-id="${escapeHTML(e.id)}"` : "";
+        li.innerHTML = `
+          <button class="entry-delete absolute top-2 right-2 w-7 h-7 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition opacity-0 group-hover:opacity-100 focus:opacity-100" title="Delete entry"${idAttr}>×</button>
+          <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-1 pr-8">
+            <span class="text-xs sm:text-sm mono text-slate-500">${escapeHTML(e.timestamp)}</span>
+            <span class="text-xs px-2 py-0.5 rounded ${badgeClass(e.type)}">${escapeHTML(e.type || "—")}</span>
+          </div>
+          <div class="font-medium text-slate-900 break-words pr-8">${escapeHTML(e.title || "")}</div>
+          ${messagesHTML}
+        `;
+        const btn = li.querySelector(".entry-delete");
+        if (e.id) {
+          btn.onclick = () => deleteEntry(e.id, e.title);
+        } else {
+          btn.disabled = true;
+          btn.title = "Legacy entry without ID — cannot delete individually";
+          btn.classList.add("cursor-not-allowed");
+        }
+        ul.appendChild(li);
+      }
+    }
+
+    function renderPager(page, totalPages) {
+      const nav = $("#pager");
+      nav.innerHTML = "";
+      if (totalPages <= 1) return;
+      const btn = (label, target, disabled, active) => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.className = "min-w-[36px] px-3 py-1 rounded border text-sm " +
+          (active ? "bg-slate-900 text-white border-slate-900" :
+           disabled ? "text-slate-300 border-slate-200 cursor-not-allowed" :
+           "bg-white border-slate-300 hover:bg-slate-100");
+        if (!disabled && !active) b.onclick = () => { state.page = target; load(); };
+        return b;
+      };
+      nav.appendChild(btn("«", 1, page === 1, false));
+      nav.appendChild(btn("‹", page - 1, page === 1, false));
+      const start = Math.max(1, page - 2);
+      const end = Math.min(totalPages, start + 4);
+      for (let i = start; i <= end; i++) nav.appendChild(btn(String(i), i, false, i === page));
+      nav.appendChild(btn("›", page + 1, page === totalPages, false));
+      nav.appendChild(btn("»", totalPages, page === totalPages, false));
+    }
+
+    function populateTypes(types) {
+      const sel = $("#filter-type");
+      const current = state.type;
+      sel.innerHTML = '<option value="">All</option>' +
+        types.map((t) => `<option value="${escapeHTML(t)}"${t === current ? " selected" : ""}>${escapeHTML(t)}</option>`).join("");
+    }
+
+    function updateClearButton(total) {
+      const btn = $("#clear");
+      const filtered = state.type || state.q;
+      btn.textContent = filtered ? `Delete ${total} matching` : "Delete all";
+      btn.disabled = total === 0;
+      btn.classList.toggle("opacity-50", total === 0);
+      btn.classList.toggle("cursor-not-allowed", total === 0);
+    }
+
+    function buildFilterParams(url) {
+      if (state.type) url.searchParams.set("type", state.type);
+      if (state.q) url.searchParams.set("q", state.q);
+    }
+
+    async function load() {
+      const url = new URL("/logs.json", window.location.origin);
+      url.searchParams.set("page", state.page);
+      url.searchParams.set("size", state.size);
+      buildFilterParams(url);
+      const res = await fetch(url);
+      if (!res.ok) {
+        $("#meta").textContent = "Failed to load logs: " + res.status;
+        return;
+      }
+      const data = await res.json();
+      populateTypes(data.types || []);
+      renderEntries(data.entries || []);
+      renderPager(data.page, data.total_pages);
+      updateClearButton(data.total || 0);
+      $("#meta").textContent =
+        `${data.total} entries · page ${data.page} of ${data.total_pages || 1} · refreshed ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function deleteEntry(id, title) {
+      const label = title ? `"${title.length > 60 ? title.slice(0, 60) + "…" : title}"` : "this entry";
+      if (!window.confirm(`Delete ${label}?`)) return;
+      const res = await fetch(`/logs/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok && res.status !== 404) {
+        alert("Delete failed: " + res.status);
+        return;
+      }
+      load();
+    }
+
+    async function deleteAll() {
+      const filtered = state.type || state.q;
+      const label = filtered
+        ? `the ${$("#meta").textContent.match(/^\d+/)?.[0] || ""} entries matching the current filter`.trim()
+        : "ALL log entries";
+      if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+      const url = new URL("/logs", window.location.origin);
+      buildFilterParams(url);
+      const res = await fetch(url, { method: "DELETE" });
+      if (!res.ok) {
+        alert("Delete failed: " + res.status);
+        return;
+      }
+      state.page = 1;
+      load();
+    }
+
+    $("#refresh").onclick = () => load();
+    $("#clear").onclick = () => deleteAll();
+    $("#filter-type").onchange = (e) => { state.type = e.target.value; state.page = 1; load(); };
+    $("#filter-size").onchange = (e) => { state.size = parseInt(e.target.value, 10); state.page = 1; load(); };
+    $("#filter-q").oninput = (e) => {
+      const v = e.target.value;
+      if (qTimer) clearTimeout(qTimer);
+      qTimer = setTimeout(() => { state.q = v; state.page = 1; load(); }, 200);
+    };
+    $("#auto-refresh").onchange = (e) => {
+      if (timer) { clearInterval(timer); timer = null; }
+      if (e.target.checked) timer = setInterval(load, 3000);
+    };
+
+    load();
+  </script>
+</body>
+</html>
