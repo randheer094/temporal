@@ -82,13 +82,19 @@
       for (const e of entries) {
         const li = document.createElement("li");
         li.className = "bg-white rounded-lg border border-slate-200 shadow-sm p-3 sm:p-4";
+        const messages = Array.isArray(e.message) ? e.message : (e.message ? [e.message] : []);
+        const messagesHTML = messages.length
+          ? `<ul class="text-sm text-slate-700 mt-1 space-y-1 list-disc list-inside marker:text-slate-400">${
+              messages.map((m) => `<li class="whitespace-pre-wrap break-words">${escapeHTML(m)}</li>`).join("")
+            }</ul>`
+          : "";
         li.innerHTML = `
           <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-1">
             <span class="text-xs sm:text-sm mono text-slate-500">${escapeHTML(e.timestamp)}</span>
             <span class="text-xs px-2 py-0.5 rounded ${badgeClass(e.type)}">${escapeHTML(e.type || "—")}</span>
           </div>
           <div class="font-medium text-slate-900 break-words">${escapeHTML(e.title || "")}</div>
-          <div class="text-sm text-slate-700 mt-1 whitespace-pre-wrap break-words">${escapeHTML(e.message || "")}</div>
+          ${messagesHTML}
         `;
         ul.appendChild(li);
       }

@@ -75,7 +75,9 @@ MESSAGE
 
 ### Rule-based ingestion
 
-The same `POST /events` endpoint also accepts arbitrary JSON shapes. The daemon resolves a target (host, path, method, response status) from the body and runs it against `~/.temporal/rules.yaml`. The first matching rule's `extract` templates render the log entry. If no rule matches, the body is decoded as the legacy `{type,title,message}` event (empty payloads return 400). Bodies may also be a JSON **array** — each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
+The same `POST /events` endpoint accepts arbitrary JSON shapes. The daemon resolves a target (host, path, method, response status) from the body and runs it against `~/.temporal/rules.yaml`. The first matching rule's `extract` templates render the log entry. If no rule matches, the body is decoded as the legacy `{type,title,message}` event. Bodies may also be a JSON **array** — each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
+
+The endpoint **always returns `200 OK`**. The JSON response carries a `status` field of `"ok"` (something was logged), `"no_match"` (nothing logged), or `"ignored"` (request not processable). Empty extractions are skipped — a rule whose templates all render to empty strings produces no log entry.
 
 #### Rule format
 
@@ -90,10 +92,42 @@ rules:
     extract:
       type: "user_action"
       title: "Login: {request.body.user.name}"
-      message: "status={response.statusCode} ip={request.headers.X-Forwarded-For}"
+      message:
+        - "status={response.statusCode}"
+        - "ip={request.headers.X-Forwarded-For}"
 ```
 
-A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings. `rules.yaml` is reloaded on every request, so edits take effect without a restart.
+A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings; empty messages are dropped from the array. `rules.yaml` is reloaded on every request, so edits take effect without a restart.
+
+`extract.message` accepts either a single string or a list of strings (rendered as separate lines in the log entry).
+
+#### Fan-out across nested arrays (`each`)
+
+When a payload contains a list and you want **one log entry per matching item**, set `each` to a [gjson path](https://github.com/tidwall/gjson#path-syntax) that resolves to those elements. Each matched element becomes the rendering context, so templates reference fields directly (`{name}`, not `{items.0.name}`). gjson queries inside the path provide the filter:
+
+```yaml
+- name: cart_alerts
+  match: { path: /api/cart }
+  each: 'items.#(name%"*alert*")#'   # only items whose name contains "alert"
+  extract:
+    type: "cart_alert"
+    title: "{name}"
+    message:
+      - "qty {qty}"
+      - "id {id}"
+```
+
+Filter cheatsheet (gjson native):
+
+| `each` path                         | Meaning                              |
+| ----------------------------------- | ------------------------------------ |
+| `items.#(name%"*alert*")#`          | name matches wildcard                |
+| `items.#(qty>5)#`                   | numeric comparison                   |
+| `items.#(active==true)#`            | boolean                              |
+| `items.#(name%"*alert*"&qty>0)#`    | combined (AND)                       |
+| `items`                             | every element (no filter)            |
+
+If the path resolves to nothing, no entries are written.
 
 #### Target resolution
 

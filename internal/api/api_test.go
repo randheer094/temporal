@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -384,7 +385,7 @@ rules:
 	}
 }
 
-func TestProxymanWrongHostDoesNotMatch(t *testing.T) {
+func TestEventsAlwaysReturns200(t *testing.T) {
 	dir := t.TempDir()
 	writeRules(t, dir, `
 rules:
@@ -396,14 +397,25 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(`{"url":"https://other.com/v1/x"}`)
-	rr := httptest.NewRecorder()
-	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+
+	cases := [][]byte{
+		[]byte(`{"url":"https://other.com/v1/x"}`), // no rule match
+		[]byte(`not even json`),                    // invalid JSON
+		[]byte(`{}`),                               // empty object
+		[]byte(`[]`),                               // empty array
+	}
+	for _, body := range cases {
+		rr := httptest.NewRecorder()
+		a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+		if rr.Code != http.StatusOK {
+			t.Errorf("body %q: status = %d, want 200", string(body), rr.Code)
+		}
+	}
 	a.Close()
 
-	// No rule matches and the body isn't a legacy Event — expect 400.
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
+	if len(got) != 0 {
+		t.Errorf("events.log should be empty, got: %s", got)
 	}
 }
 
@@ -478,6 +490,91 @@ rules:
 	// status-required rule should NOT have fired.
 	if strings.Contains(s, "ok\nT\nM") {
 		t.Errorf("status-required rule fired without response:\n%s", s)
+	}
+}
+
+func TestEachFanOutWithFilterAndArrayMessage(t *testing.T) {
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: cart_alerts
+    match: { path: /api/cart }
+    each: 'items.#(name%"*alert*")#'
+    extract:
+      type: "alert"
+      title: "{name}"
+      message:
+        - "qty {qty}"
+        - "id {id}"
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{
+		"url":"/api/cart",
+		"items":[
+			{"id":1,"name":"apple","qty":3},
+			{"id":2,"name":"alert: pear","qty":1},
+			{"id":3,"name":"banana","qty":4},
+			{"id":4,"name":"alert: kiwi","qty":2}
+		]
+	}`)
+	rr := httptest.NewRecorder()
+	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	a.Close()
+
+	// Verify two entries via the JSON viewer; messages should be arrays.
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+	rr = httptest.NewRecorder()
+	a2.logsJSONHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.json", nil))
+	var resp logsResponse
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Total != 2 {
+		t.Fatalf("total = %d, want 2", resp.Total)
+	}
+	titles := []string{resp.Entries[0].Title, resp.Entries[1].Title}
+	sort.Strings(titles)
+	if titles[0] != "alert: kiwi" || titles[1] != "alert: pear" {
+		t.Errorf("titles = %v", titles)
+	}
+	for _, e := range resp.Entries {
+		if len(e.Message) != 2 {
+			t.Errorf("entry %q message len = %d, want 2 (%v)", e.Title, len(e.Message), e.Message)
+		}
+	}
+}
+
+func TestEmptyExtractIsNotLogged(t *testing.T) {
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: empty_when_missing
+    match: { path: /api/x }
+    extract:
+      type: "{a.b}"
+      title: "{c.d}"
+      message: "{e.f}"
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	body := []byte(`{"url":"/api/x"}`)
+	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	a.Close()
+
+	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
+	if len(got) != 0 {
+		t.Errorf("expected no log written, got: %s", got)
 	}
 }
 

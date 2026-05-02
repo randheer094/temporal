@@ -112,20 +112,26 @@ rules:
     extract:
       type: "user"
       title: "Login: {request.body.user.name}"
-      message: "status={response.statusCode} body={response.body.message}"
+      message:
+        - "status={response.statusCode}"
+        - "body={response.body.message}"
 `))
 	r := rs.Find(Target{Path: "/api/login"})
 	body := []byte(`{"url":"/api/login","request":{"body":{"user":{"name":"jane"}}},"response":{"statusCode":200,"body":{"message":"hi"}}}`)
-	got := r.Apply(body)
+	results := r.Apply(body)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	got := results[0]
 	if got.Title != "Login: jane" {
 		t.Errorf("title = %q", got.Title)
 	}
-	if got.Message != "status=200 body=hi" {
-		t.Errorf("message = %q", got.Message)
+	if len(got.Message) != 2 || got.Message[0] != "status=200" || got.Message[1] != "body=hi" {
+		t.Errorf("message = %v", got.Message)
 	}
 }
 
-func TestApplyMissingResponseRendersEmpty(t *testing.T) {
+func TestApplyMissingResponseDropsEmptyMessage(t *testing.T) {
 	rs, _ := Load(writeRules(t, `
 rules:
   - name: api
@@ -133,16 +139,103 @@ rules:
     extract:
       type: "t"
       title: "{request.body.user.name}"
-      message: "status={response.statusCode}"
+      message: "{response.body.message}"
 `))
 	r := rs.Find(Target{Path: "/api/login"})
 	body := []byte(`{"url":"/api/login","request":{"body":{"user":{"name":"jane"}}}}`) // onRequest forward, no response
-	got := r.Apply(body)
-	if got.Title != "jane" {
-		t.Errorf("title = %q", got.Title)
+	results := r.Apply(body)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
 	}
-	if got.Message != "status=" {
-		t.Errorf("message = %q", got.Message)
+	if results[0].Title != "jane" {
+		t.Errorf("title = %q", results[0].Title)
+	}
+	// Empty rendered messages are dropped from the array.
+	if len(results[0].Message) != 0 {
+		t.Errorf("message = %v, want empty", results[0].Message)
+	}
+}
+
+func TestApplySkipsAllEmptyResult(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: empty_when_missing
+    match: { path: /api/x }
+    extract:
+      type: "{a.b}"
+      title: "{c.d}"
+      message: "{e.f}"
+`))
+	r := rs.Find(Target{Path: "/api/x"})
+	results := r.Apply([]byte(`{"url":"/api/x"}`))
+	if len(results) != 0 {
+		t.Fatalf("results = %d, want 0 for all-empty", len(results))
+	}
+}
+
+func TestApplyEachWithFilter(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: cart_alerts
+    match: { path: /api/cart }
+    each: 'items.#(name%"*alert*")#'
+    extract:
+      type: "alert"
+      title: "{name}"
+      message:
+        - "qty {qty}"
+        - "id {id}"
+`))
+	r := rs.Find(Target{Path: "/api/cart"})
+	body := []byte(`{
+		"url": "/api/cart",
+		"items": [
+			{"id": 1, "name": "apple", "qty": 3},
+			{"id": 2, "name": "low-stock alert: pear", "qty": 1},
+			{"id": 3, "name": "banana", "qty": 4},
+			{"id": 4, "name": "alert: kiwi", "qty": 2}
+		]
+	}`)
+	results := r.Apply(body)
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2: %+v", len(results), results)
+	}
+	if results[0].Title != "low-stock alert: pear" || results[1].Title != "alert: kiwi" {
+		t.Errorf("titles = %q, %q", results[0].Title, results[1].Title)
+	}
+	if len(results[0].Message) != 2 || results[0].Message[0] != "qty 1" || results[0].Message[1] != "id 2" {
+		t.Errorf("first message = %v", results[0].Message)
+	}
+}
+
+func TestApplyEachMissingPathReturnsNothing(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /api/x }
+    each: items
+    extract:
+      type: t
+      title: "{name}"
+`))
+	r := rs.Find(Target{Path: "/api/x"})
+	if results := r.Apply([]byte(`{"url":"/api/x"}`)); len(results) != 0 {
+		t.Errorf("results = %d, want 0", len(results))
+	}
+}
+
+func TestExtractAcceptsScalarMessage(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    extract:
+      type: t
+      title: T
+      message: "single"
+`))
+	if got := rs.Rules[0].Extract.Message; len(got) != 1 || got[0] != "single" {
+		t.Errorf("message = %v", got)
 	}
 }
 

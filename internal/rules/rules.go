@@ -1,25 +1,27 @@
 // Package rules loads ingestion rules from YAML and applies them to incoming
 // JSON payloads. A rule matches a request by host/path/method (plus an
 // optional response status) and extracts fields using gjson paths embedded
-// in template strings.
+// in template strings. An optional `each` gjson path fans the rule out
+// across nested array elements, so a body containing a list can produce
+// one log entry per matching item.
 //
 // Rule example:
 //
 //	rules:
-//	  - name: user_login
+//	  - name: cart_alerts
 //	    match:
-//	      host: api.example.com   # optional, case-insensitive exact match
-//	      path: /api/login        # exact, or trailing /* for prefix
-//	      method: POST            # optional, case-insensitive
-//	      status: "2xx"           # optional; "200", "2xx"/"4xx"/"5xx", or empty
+//	      host: api.example.com
+//	      path: /api/cart
+//	    each: 'items.#(name%"*alert*")#'   # one event per matching item
 //	    extract:
-//	      type: "user_action"
-//	      title: "Login: {request.body.user.name}"
-//	      message: "{response.body.message}"
+//	      type: "cart_alert"
+//	      title: "{name}"
+//	      message:
+//	        - "qty {qty}"
+//	        - "id {id}"
 //
-// A rule with `status` set only matches when the payload carries a response
-// (i.e. a Proxyman onResponse forward). Bodies originating from onRequest
-// match rules without a `status` constraint.
+// Without `each`, templates render once against the whole body. With `each`,
+// each matched element becomes the body for template rendering.
 package rules
 
 import (
@@ -40,15 +42,55 @@ type Match struct {
 	Status string `yaml:"status"`
 }
 
+// Extract holds the templates rendered for each event. Message is a list so
+// rules can produce multi-line / multi-section log messages; the YAML field
+// accepts either a single string or a list of strings.
 type Extract struct {
-	Type    string `yaml:"type"`
-	Title   string `yaml:"title"`
-	Message string `yaml:"message"`
+	Type    string   `yaml:"type"`
+	Title   string   `yaml:"title"`
+	Message []string `yaml:"-"`
+}
+
+// extractRaw mirrors Extract for unmarshaling, treating Message as a generic
+// node so we can accept either a scalar or a sequence.
+type extractRaw struct {
+	Type    string    `yaml:"type"`
+	Title   string    `yaml:"title"`
+	Message yaml.Node `yaml:"message"`
+}
+
+func (e *Extract) UnmarshalYAML(node *yaml.Node) error {
+	var raw extractRaw
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	e.Type = raw.Type
+	e.Title = raw.Title
+	switch raw.Message.Kind {
+	case 0:
+		// no message field
+	case yaml.ScalarNode:
+		var s string
+		if err := raw.Message.Decode(&s); err != nil {
+			return err
+		}
+		if s != "" {
+			e.Message = []string{s}
+		}
+	case yaml.SequenceNode:
+		if err := raw.Message.Decode(&e.Message); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("rules: extract.message must be a string or a list")
+	}
+	return nil
 }
 
 type Rule struct {
 	Name    string  `yaml:"name"`
 	Match   Match   `yaml:"match"`
+	Each    string  `yaml:"each"`
 	Extract Extract `yaml:"extract"`
 }
 
@@ -66,11 +108,26 @@ type Target struct {
 	StatusCode int
 }
 
+// Result is one fully-rendered event produced by a rule.
 type Result struct {
 	RuleName string
 	Type     string
 	Title    string
-	Message  string
+	Message  []string
+}
+
+// Empty reports whether the rendered event has no content. Used by callers
+// to skip writing a log entry that resolved to all-empty fields.
+func (r Result) Empty() bool {
+	if r.Type != "" || r.Title != "" {
+		return false
+	}
+	for _, m := range r.Message {
+		if m != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // Load reads and parses a YAML rules file. A missing file returns an empty
@@ -253,16 +310,49 @@ func firstNonZero(values ...int) int {
 
 var placeholder = regexp.MustCompile(`\{([^{}]+)\}`)
 
-// Apply runs the rule's extract templates against the JSON body. {a.b.c}
-// placeholders are replaced via gjson; missing paths render as empty
-// strings. Strings without placeholders pass through.
-func (r *Rule) Apply(jsonBody []byte) Result {
-	return Result{
-		RuleName: r.Name,
-		Type:     render(r.Extract.Type, jsonBody),
-		Title:    render(r.Extract.Title, jsonBody),
-		Message:  render(r.Extract.Message, jsonBody),
+// Apply runs the rule against a JSON body and returns zero or more results.
+//
+//   - With `each` unset: one Result rendered against the whole body.
+//   - With `each` set: the gjson path is resolved; each element becomes the
+//     body for one Result. If the path resolves to a single object, one
+//     Result is produced. Missing path or empty array → no Results.
+//
+// Empty Results (all fields rendered empty) are filtered out so the
+// caller doesn't write blank log entries.
+func (r *Rule) Apply(jsonBody []byte) []Result {
+	bodies := r.contextBodies(jsonBody)
+	out := make([]Result, 0, len(bodies))
+	for _, b := range bodies {
+		res := Result{
+			RuleName: r.Name,
+			Type:     render(r.Extract.Type, b),
+			Title:    render(r.Extract.Title, b),
+			Message:  renderMessages(r.Extract.Message, b),
+		}
+		if !res.Empty() {
+			out = append(out, res)
+		}
 	}
+	return out
+}
+
+func (r *Rule) contextBodies(jsonBody []byte) [][]byte {
+	if r.Each == "" {
+		return [][]byte{jsonBody}
+	}
+	got := gjson.GetBytes(jsonBody, r.Each)
+	if !got.Exists() {
+		return nil
+	}
+	if got.IsArray() {
+		var out [][]byte
+		got.ForEach(func(_, item gjson.Result) bool {
+			out = append(out, []byte(item.Raw))
+			return true
+		})
+		return out
+	}
+	return [][]byte{[]byte(got.Raw)}
 }
 
 func render(tpl string, body []byte) string {
@@ -273,4 +363,18 @@ func render(tpl string, body []byte) string {
 		path := m[1 : len(m)-1]
 		return gjson.GetBytes(body, path).String()
 	})
+}
+
+func renderMessages(tpls []string, body []byte) []string {
+	if len(tpls) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tpls))
+	for _, tpl := range tpls {
+		s := render(tpl, body)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

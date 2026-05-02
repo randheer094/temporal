@@ -72,21 +72,25 @@ func (a *API) Close() {
 // @description API for the Temporal event logger
 // @BasePath /
 //
-// POST /events accepts arbitrary JSON. If the body (or array element) carries
-// a top-level "url" field that matches a rule in rules.yaml, the rule's
-// extract templates render the log entry via gjson. Otherwise the body is
-// decoded as the legacy Event struct ({type,title,message}). Writes are
-// queued by filewriter and the handler returns immediately.
+// POST /events accepts arbitrary JSON (object or array). The body is matched
+// against rules.yaml; matching rules render templates via gjson and may
+// fan out across nested arrays via `each`. Bodies with no rule match fall
+// back to the legacy {type,title,message} Event shape. Writes are queued
+// by filewriter; the handler always returns 200 and only persists entries
+// when the rule produced non-empty output.
 func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
 	a.logDaemon("Received request on " + r.URL.Path)
 	if r.Method != http.MethodPost {
-		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		// Even non-POST returns 200 to honor the "always 200" contract; we
+		// just skip processing.
+		respondOK(w, "ignored")
 		return
 	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusInternalServerError)
+		a.logDaemon("read body failed: " + err.Error())
+		respondOK(w, "ignored")
 		return
 	}
 	defer r.Body.Close()
@@ -96,52 +100,50 @@ func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
 		a.logDaemon("rules load failed: " + rulesErr.Error())
 	}
 
+	written := 0
 	if isJSONArray(body) {
-		matched := 0
 		gjson.ParseBytes(body).ForEach(func(_, item gjson.Result) bool {
-			if a.processItem(rs, []byte(item.Raw)) {
-				matched++
-			}
+			written += a.processItem(rs, []byte(item.Raw))
 			return true
 		})
-		if matched == 0 {
-			http.Error(w, "no items processed", http.StatusBadRequest)
-			return
-		}
-		respondOK(w)
-		return
+	} else {
+		written = a.processItem(rs, body)
 	}
 
-	if a.processItem(rs, body) {
-		respondOK(w)
+	if written == 0 {
+		respondOK(w, "no_match")
 		return
 	}
-	http.Error(w, "Error decoding JSON", http.StatusBadRequest)
+	respondOK(w, "ok")
 }
 
-// processItem tries the rules engine first by extracting host/path/method/
-// status from the body (via rules.ExtractTarget) and falls back to the
-// legacy Event shape. Returns true when the item was queued for write.
-func (a *API) processItem(rs *rules.RuleSet, body []byte) bool {
+// processItem applies any matching rule to the body, falling back to the
+// legacy Event shape when no rule matches. Returns the number of log
+// entries queued (rules with `each` may produce multiple).
+func (a *API) processItem(rs *rules.RuleSet, body []byte) int {
 	if rs != nil && len(rs.Rules) > 0 {
 		target := rules.ExtractTarget(body)
 		if rule := rs.Find(target); rule != nil {
-			res := rule.Apply(body)
-			a.writeEvent(res.Type, res.Title, res.Message)
-			return true
+			results := rule.Apply(body)
+			for _, res := range results {
+				a.writeEvent(res.Type, res.Title, res.Message)
+			}
+			return len(results)
 		}
 	}
 	var entry Event
 	if err := json.Unmarshal(body, &entry); err != nil {
-		return false
+		return 0
 	}
-	// Reject empty payloads so a no-rule-match Proxyman-style body returns
-	// 400 instead of writing a blank event.
 	if entry.Type == "" && entry.Title == "" && entry.Message == "" {
-		return false
+		return 0
 	}
-	a.writeEvent(entry.Type, entry.Title, entry.Message)
-	return true
+	msgs := []string(nil)
+	if entry.Message != "" {
+		msgs = []string{entry.Message}
+	}
+	a.writeEvent(entry.Type, entry.Title, msgs)
+	return 1
 }
 
 func isJSONArray(body []byte) bool {
@@ -158,15 +160,37 @@ func isJSONArray(body []byte) bool {
 	return false
 }
 
-func (a *API) writeEvent(eventType, title, message string) {
+// writeEvent serializes one log entry. Each message in `messages` is written
+// on its own line between TITLE and the END marker. Newlines inside any
+// field are flattened to spaces so the line-based parser stays simple.
+func (a *API) writeEvent(eventType, title string, messages []string) {
 	timestamp := time.Now().Format(time.RFC3339)
-	a.events.Write(fmt.Sprintf("*****START*****\n%s %s\n%s\n%s\n*****END*****\n",
-		timestamp, eventType, title, message))
+	var buf strings.Builder
+	buf.WriteString("*****START*****\n")
+	buf.WriteString(timestamp)
+	buf.WriteByte(' ')
+	buf.WriteString(sanitizeLine(eventType))
+	buf.WriteByte('\n')
+	buf.WriteString(sanitizeLine(title))
+	buf.WriteByte('\n')
+	for _, m := range messages {
+		buf.WriteString(sanitizeLine(m))
+		buf.WriteByte('\n')
+	}
+	buf.WriteString("*****END*****\n")
+	a.events.Write(buf.String())
 }
 
-func respondOK(w http.ResponseWriter) {
+func sanitizeLine(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return s
+	}
+	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+}
+
+func respondOK(w http.ResponseWriter, status string) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
 
 // @Summary Log an event
@@ -205,10 +229,10 @@ func (a *API) logDaemon(message string) {
 // --- Logs viewer ---
 
 type logEntry struct {
-	Timestamp string `json:"timestamp"`
-	Type      string `json:"type"`
-	Title     string `json:"title"`
-	Message   string `json:"message"`
+	Timestamp string   `json:"timestamp"`
+	Type      string   `json:"type"`
+	Title     string   `json:"title"`
+	Message   []string `json:"message"`
 }
 
 type logsResponse struct {
@@ -332,7 +356,12 @@ func parseEventsLog(data []byte) []logEntry {
 			entry.Title = lines[1]
 		}
 		if len(lines) >= 3 {
-			entry.Message = strings.Join(lines[2:], "\n")
+			for _, m := range lines[2:] {
+				if m == "" {
+					continue
+				}
+				entry.Message = append(entry.Message, m)
+			}
 		}
 		entries = append(entries, entry)
 	}
