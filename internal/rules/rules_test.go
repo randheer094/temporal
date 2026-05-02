@@ -234,8 +234,124 @@ rules:
       title: T
       message: "single"
 `))
-	if got := rs.Rules[0].Extract.Message; len(got) != 1 || got[0] != "single" {
+	if got := rs.Rules[0].Extracts[0].Message; len(got) != 1 || got[0] != "single" {
 		t.Errorf("message = %v", got)
+	}
+}
+
+func TestMatchListAcceptsAnyAlternative(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: cart_or_order
+    match:
+      - { host: api.example.com, path: /api/cart }
+      - { host: api.example.com, path: /api/order }
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(Target{Host: "api.example.com", Path: "/api/cart"}); r == nil {
+		t.Fatal("expected match for /api/cart")
+	}
+	if r := rs.Find(Target{Host: "api.example.com", Path: "/api/order"}); r == nil {
+		t.Fatal("expected match for /api/order")
+	}
+	if r := rs.Find(Target{Host: "api.example.com", Path: "/api/profile"}); r != nil {
+		t.Fatal("/api/profile should not match either alternative")
+	}
+}
+
+func TestExtractListProducesOneEntryPerExtract(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: dual
+    match: { path: /x }
+    extract:
+      - { type: a, title: "A {n}", message: "ma" }
+      - { type: b, title: "B {n}", message: "mb" }
+`))
+	r := rs.Find(Target{Path: "/x"})
+	results := r.Apply([]byte(`{"url":"/x","n":"v"}`))
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2", len(results))
+	}
+	if results[0].Type != "a" || results[0].Title != "A v" {
+		t.Errorf("first = %+v", results[0])
+	}
+	if results[1].Type != "b" || results[1].Title != "B v" {
+		t.Errorf("second = %+v", results[1])
+	}
+}
+
+func TestEachListUnionsContextBodies(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: cart_and_alerts
+    match: { path: /x }
+    each:
+      - 'cart.items'
+      - 'alerts'
+    extract: { type: t, title: "{name}", message: "id {id}" }
+`))
+	r := rs.Find(Target{Path: "/x"})
+	body := []byte(`{
+		"url":"/x",
+		"cart":{"items":[
+			{"id":1,"name":"apple"},
+			{"id":2,"name":"pear"}
+		]},
+		"alerts":[
+			{"id":99,"name":"low-stock"}
+		]
+	}`)
+	results := r.Apply(body)
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	titles := []string{results[0].Title, results[1].Title, results[2].Title}
+	want := []string{"apple", "pear", "low-stock"}
+	for i, w := range want {
+		if titles[i] != w {
+			t.Errorf("results[%d].Title = %q, want %q", i, titles[i], w)
+		}
+	}
+}
+
+func TestEachListWithMultipleExtractsCartesians(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: combo
+    match: { path: /x }
+    each: ['items']
+    extract:
+      - { type: a, title: "A {name}" }
+      - { type: b, title: "B {name}" }
+`))
+	r := rs.Find(Target{Path: "/x"})
+	body := []byte(`{"url":"/x","items":[{"name":"foo"},{"name":"bar"}]}`)
+	results := r.Apply(body)
+	// 2 items × 2 extracts = 4 entries
+	if len(results) != 4 {
+		t.Fatalf("results = %d, want 4", len(results))
+	}
+	got := []string{}
+	for _, r := range results {
+		got = append(got, r.Type+":"+r.Title)
+	}
+	want := []string{"a:A foo", "b:B foo", "a:A bar", "b:B bar"}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("results[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestEmptyMatchListMatchesEverything(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: catch_all
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(Target{Path: "/anything"}); r == nil {
+		t.Fatal("rule with no match block should match anything")
 	}
 }
 

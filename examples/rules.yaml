@@ -1,25 +1,29 @@
 # Example rules.yaml — copy to ~/.temporal/rules.yaml.
 #
-# Each incoming POST /events body is checked against these rules in order.
-# The first match wins. Match fields are all optional except path. Templates
-# use {gjson.path} placeholders against the request body; missing paths
-# render as empty strings.
+# Each incoming POST /events body is checked against these rules in order;
+# the first matching rule wins. Templates use {gjson.path} placeholders
+# evaluated against the request body — missing paths render as empty
+# strings, fully-empty entries are dropped.
 #
-# `each` (optional) is a gjson path to a nested array. When set, the rule
-# fans out: each matched element becomes the body for one log entry. Use
-# gjson query syntax to filter, e.g. items.#(name%"*alert*")#
+# `match`, `each`, and `extract` each accept a single value OR a list:
+#   - multiple `match` blocks  → OR (rule fires if any block matches)
+#   - multiple `each` paths    → union of resolved elements (one body each)
+#   - multiple `extract` blocks → one log entry per (body × extract) pair
 #
-# `message` may be a single string or a list of strings (rendered as
-# multiple lines in the log entry).
+# After editing this file, run `temporal server rules` to reload it in the
+# running daemon (the command also validates the YAML for you).
 
 rules:
-  # Log every successful login attempt forwarded by Proxyman onResponse.
+  # ─────────────────────────────────────────────────────────────────────
+  # 1. Simplest form — single match, single extract, no `each`.
+  #    Logs every successful login forwarded by Proxyman onResponse.
+  # ─────────────────────────────────────────────────────────────────────
   - name: user_login
     match:
       host: api.example.com
       path: /api/login
       method: POST
-      status: "2xx"
+      status: "2xx"          # only matches when payload includes a response
     extract:
       type: "user_action"
       title: "Login OK: {request.body.user.name}"
@@ -27,22 +31,41 @@ rules:
         - "ip={request.headers.X-Forwarded-For}"
         - "ua={request.headers.User-Agent}"
 
-  # Capture all server errors under /api/* regardless of method.
+  # ─────────────────────────────────────────────────────────────────────
+  # 2. Path prefix + status family — capture every 5xx under /api/*.
+  # ─────────────────────────────────────────────────────────────────────
   - name: api_error
     match:
-      path: /api/*
+      path: /api/*           # trailing /* is a prefix match
       status: "5xx"
     extract:
       type: "error"
       title: "{response.statusCode} {request.method} {request.path}"
       message: "{response.body.error}"
 
-  # Fan-out + filter: emit one event per cart item whose name contains
-  # "alert", regardless of how many other items the cart has.
-  - name: cart_alerts
+  # ─────────────────────────────────────────────────────────────────────
+  # 3. Multiple match blocks — OR semantics.
+  #    Same handling for two endpoints without duplicating the rule.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: cart_or_order_audit
     match:
-      path: /api/cart
-    each: 'items.#(name%"*alert*")#'
+      - { host: api.example.com, path: /api/cart,  method: POST }
+      - { host: api.example.com, path: /api/order, method: POST }
+    extract:
+      type: "checkout"
+      title: "{request.method} {request.path}"
+      message:
+        - "user={request.body.user.id}"
+        - "total={request.body.total}"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 4. Single `each` with a wildcard predicate — fan out across array items.
+  #    Note the SINGLE quotes; double quotes break YAML when the pattern
+  #    itself contains double quotes.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: cart_alerts
+    match: { path: /api/cart, method: GET }   # method narrows so rule 5 isn't shadowed
+    each: 'items.#(name%"*alert*")#'          # items whose name contains "alert"
     extract:
       type: "cart_alert"
       title: "{name}"
@@ -50,12 +73,68 @@ rules:
         - "qty {qty}"
         - "id {id}"
 
-  # Generic onRequest log — fires when a payload has no response.
-  # No `status` constraint, so it matches request-only forwards too.
-  - name: api_request
-    match:
-      host: api.example.com
-      path: /api/*
+  # ─────────────────────────────────────────────────────────────────────
+  # 5. Multiple `each` paths — union into one stream of entries.
+  #    Useful when one payload contains two arrays you care about. Fires
+  #    on a different method than rule 4 to avoid the first-match-wins
+  #    shadowing.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: dashboard_items_and_alerts
+    match: { path: /api/dashboard }
+    each:
+      - 'items'                              # every item
+      - 'alerts.#(severity=="high")#'        # only high-severity alerts
+    extract:
+      type: "dashboard_entry"
+      title: "{name}"
+      message: "id {id}"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 6. Multiple `extract` blocks — split each item into two log entries.
+  #    Both extracts render against the same context body (one order item),
+  #    so they reference {sku}, {qty}, {unitPrice} directly. Use this when
+  #    one input row should fan out into multiple distinct event types.
+  #
+  #    Heads up: mixing multi-`each` WITH multi-`extract` produces a full
+  #    cartesian (every body × every extract). If your extract templates
+  #    only make sense in one of the contexts, prefer separate rules.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: order_item_facets
+    match: { path: /api/order, status: "2xx" }
+    each: 'request.body.items'
+    extract:
+      - type: "order_item"
+        title: "{sku}"
+        message:
+          - "qty {qty}"
+          - "price {unitPrice}"
+      - type: "order_item_revenue"
+        title: "{sku}"
+        message: "rev {qty} x {unitPrice}"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 7. Numeric and boolean predicates inside `each`.
+  #    Cheatsheet:
+  #      qty>5            numeric comparison
+  #      active==true     boolean equality
+  #      name%"*alert*"   wildcard pattern (use ? for one char)
+  #
+  #    NOTE: gjson's compound `&`/`|` operators are unreliable, so this
+  #    rule applies just one predicate. Use multiple `each` paths for OR.
+  # ─────────────────────────────────────────────────────────────────────
+  - name: large_items
+    match: { path: /api/inventory }
+    each: 'items.#(qty>10)#'
+    extract:
+      type: "inventory"
+      title: "{sku}"
+      message: "qty {qty}"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 8. No `match` block at all — catch-all.
+  #    Place last (rules are evaluated top-down; first match wins).
+  # ─────────────────────────────────────────────────────────────────────
+  - name: catch_all_request
     extract:
       type: "request"
       title: "{request.method} {request.path}"
