@@ -1,36 +1,38 @@
-# Makefile for the Go log server
+BINARY      := temporal
+PKG         := ./...
+INSTALL_DIR ?= $(HOME)/.local/bin
 
-# Variables
-BINARY_NAME=temporal
-INSTALL_PATH=$(HOME)/.local/bin
+.PHONY: build vet test lint tidy run clean install uninstall
 
-# Default target
-all: build
-
-# Build the Go binary
 build:
-	@echo "Building the application..."
-	go build -o $(BINARY_NAME) main.go
+	go build -trimpath -ldflags="-s -w" -o $(BINARY) .
 
-# Run the tests
+vet:
+	go vet $(PKG)
+
 test:
-	@echo "Running tests..."
-	go test -v ./...
+	go test -count=1 $(PKG)
 
-# Install the binary
+lint: vet
+	gofmt -l . | tee /tmp/gofmt.out
+	@! [ -s /tmp/gofmt.out ]
+
+tidy:
+	go mod tidy
+
+run: build
+	./$(BINARY)
+
+# install moves the built binary into $(INSTALL_DIR) (default ~/.local/bin).
+# Override with:
+#   make install INSTALL_DIR=/usr/local/bin
 install: build
-	@echo "Installing $(BINARY_NAME) to $(INSTALL_PATH)..."
-	@mv $(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
+	mkdir -p $(INSTALL_DIR)
+	mv $(BINARY) $(INSTALL_DIR)/$(BINARY)
 
-# Uninstall the binary
 uninstall:
-	@echo "Uninstalling $(BINARY_NAME) from $(INSTALL_PATH)..."
-	@rm -f $(INSTALL_PATH)/$(BINARY_NAME)
+	rm -f "$(INSTALL_DIR)/$(BINARY)"
 
-# Clean up build artifacts
 clean:
-	@echo "Cleaning up..."
-	go clean
-	rm -f $(BINARY_NAME)
-
-.PHONY: all build test install uninstall clean
+	rm -f $(BINARY)
+	rm -rf dist
