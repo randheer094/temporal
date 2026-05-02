@@ -47,6 +47,7 @@ A daemon that exposes a REST endpoint for logging events. It manages its own pro
 | `temporal server start` | Start the daemon in the background. |
 | `temporal server stop` | Stop the running daemon. |
 | `temporal server status` | Check whether the daemon is running. |
+| `temporal server rules` | Validate `rules.yaml` and refresh the running daemon. |
 | `temporal server help` | Show help for the `server` subcommand. |
 
 ### Logging an event
@@ -90,7 +91,9 @@ rules:
         - "ip={request.headers.X-Forwarded-For}"
 ```
 
-A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings; empty messages are dropped from the array. `rules.yaml` is reloaded on every request, so edits take effect without a restart.
+A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings; empty messages are dropped from the array.
+
+`rules.yaml` is loaded once at daemon startup and cached. After editing the file, run `temporal server rules` — the command parses it locally first (so you see syntax errors immediately) and, if valid, sends the daemon SIGHUP to swap in the new rule set. A broken file never replaces a working one.
 
 `extract.message` accepts either a single string or a list of strings (rendered as separate lines in the log entry).
 
