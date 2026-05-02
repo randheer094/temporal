@@ -63,15 +63,7 @@ curl -X POST http://localhost:8005/events \
   }'
 ```
 
-Events are appended to `~/.temporal/events.log` in this format:
-
-```
-*****START*****
-DATE_TIME TYPE
-TITLE
-MESSAGE
-*****END*****
-```
+Each event is appended to `~/.temporal/events.log` as a single JSON line — see [Logs viewer](#logs-viewer) for the exact schema.
 
 ### Rule-based ingestion
 
