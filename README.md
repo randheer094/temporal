@@ -35,7 +35,7 @@ A daemon that exposes a REST endpoint for logging events. It manages its own pro
 
 ### Files
 
-- `~/.temporal/events.log` — received events, in the structured format below. Rotates to `events.log.1` once it exceeds 10MB; the previous backup is overwritten.
+- `~/.temporal/events.log` — received events, one JSON object per line: `{"id","timestamp","type","title","message":[...]}`. Rotates to `events.log.1` once it exceeds 10MB; the previous backup is overwritten.
 - `~/.temporal/daemon.log` — server activity (e.g. requests received, startup messages).
 - `~/.temporal/daemon.pid` — PID of the running daemon.
 - `~/.temporal/rules.yaml` — optional. Extraction rules applied to incoming JSON (see [Rule-based ingestion](#rule-based-ingestion)).
@@ -176,10 +176,43 @@ curl -X POST http://localhost:8005/events \
 The daemon serves a responsive web UI at `http://localhost:8005/logs` for browsing `events.log` (and the rotated backup). Features:
 
 - Pagination (configurable page size).
-- Filter by `type`.
+- Filter by `type` (dropdown).
+- Title search (case-insensitive substring).
 - Optional auto-refresh.
+- Per-entry delete (× button).
+- "Delete all" / "Delete N matching" — the header button honors both filters.
 
-The same data is available as JSON at `/logs.json?page=&size=&type=`.
+The same data is available as JSON at `/logs.json?page=&size=&type=&q=`.
+
+Storage format is **JSON lines** — one event per line, e.g.:
+
+```
+{"id":"a1b2c3d4","timestamp":"2025-05-02T10:30:01.234Z","type":"user_action","title":"Login OK: jane","message":["ip=1.2.3.4","ua=curl/8"]}
+```
+
+The `id` is a random 8-hex-char identifier assigned at write time, used for individual deletion.
+
+#### Delete API
+
+| Method   | Path             | Description                                                                 |
+| -------- | ---------------- | --------------------------------------------------------------------------- |
+| `DELETE` | `/logs`          | Delete all entries. With `?type=X` and/or `?q=text`, only matching entries. |
+| `DELETE` | `/logs/{id}`     | Delete a single entry by id. 404 if not found.                              |
+
+Examples:
+
+```bash
+# Wipe everything
+curl -X DELETE http://localhost:8005/logs
+
+# Delete all "error" type entries whose title contains "timeout"
+curl -X DELETE 'http://localhost:8005/logs?type=error&q=timeout'
+
+# Delete a single entry
+curl -X DELETE http://localhost:8005/logs/a1b2c3d4
+```
+
+Deletion pauses the writer briefly, drains pending writes, rewrites both `events.log` and `events.log.1` atomically, then resumes. Concurrent POSTs are not lost.
 
 ### API definition
 

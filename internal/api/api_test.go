@@ -16,86 +16,41 @@ import (
 )
 
 func TestLogEventHandler(t *testing.T) {
-	testDir := "test_output"
-	// Clean up previous test runs
-	os.RemoveAll(testDir)
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		t.Fatal("Failed to create test directory:", err)
-	}
-
-	a, err := NewAPI(testDir)
+	dir := t.TempDir()
+	a, err := NewAPI(dir)
 	if err != nil {
-		t.Fatal("Failed to create API:", err)
+		t.Fatal(err)
 	}
 
-	// Create a test log entry
-	entry := Event{
-		Type:    "test-type",
-		Title:   "test-title",
-		Message: "test message",
-	}
-	body, _ := json.Marshal(entry)
-
-	// Create a request and response recorder
-	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
+	body, _ := json.Marshal(Event{Type: "test-type", Title: "test-title", Message: "test message"})
 	rr := httptest.NewRecorder()
-
-	// Call the handler
-	a.logEventHandler(rr, req)
-
-	// Flush queued writes before reading the file.
+	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 	a.Close()
 
-	// Check the status code
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	if strings.TrimSpace(rr.Body.String()) != `{"status":"ok"}` {
+		t.Errorf("body = %q", rr.Body.String())
 	}
 
-	// Check the response body
-	expected := `{"status":"ok"}`
-	// Trim new line from the end of the body
-	if strings.TrimSpace(rr.Body.String()) != expected {
-		t.Errorf("handler returned unexpected body: got %v want %v",
-			rr.Body.String(), expected)
-	}
-
-	// Check if the log file was written to
-	logFilePath := filepath.Join(testDir, "events.log")
-	content, err := ioutil.ReadFile(logFilePath)
+	content, err := ioutil.ReadFile(filepath.Join(dir, "events.log"))
 	if err != nil {
-		t.Fatal("Failed to read log file:", err)
+		t.Fatal(err)
 	}
-
-	// The timestamp is dynamic, so we can't do an exact match.
-	// Instead, we'll check if the log entry contains the expected fields.
-	logString := string(content)
-	if !strings.Contains(logString, "*****START*****") {
-		t.Errorf("Log does not contain START marker")
+	entries := parseEventsLog(content)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
 	}
-	if !strings.Contains(logString, "test-type") {
-		t.Errorf("Log does not contain type")
+	e := entries[0]
+	if e.Type != "test-type" || e.Title != "test-title" || len(e.Message) != 1 || e.Message[0] != "test message" {
+		t.Errorf("entry = %+v", e)
 	}
-	if !strings.Contains(logString, "test-title") {
-		t.Errorf("Log does not contain title")
+	if e.ID == "" || len(e.ID) < 4 {
+		t.Errorf("missing/short ID: %q", e.ID)
 	}
-	if !strings.Contains(logString, "test message") {
-		t.Errorf("Log does not contain message")
-	}
-	if !strings.Contains(logString, "*****END*****") {
-		t.Errorf("Log does not contain END marker")
-	}
-
-	// Also check the timestamp format
-	lines := strings.Split(logString, "\n")
-	if len(lines) > 1 {
-		parts := strings.Split(lines[1], " ")
-		if len(parts) > 0 {
-			_, err := time.Parse(time.RFC3339, parts[0])
-			if err != nil {
-				t.Errorf("Timestamp is not in the correct format: %v", err)
-			}
-		}
+	if _, err := time.Parse(time.RFC3339Nano, e.Timestamp); err != nil {
+		t.Errorf("timestamp not RFC3339Nano: %q (%v)", e.Timestamp, err)
 	}
 }
 
@@ -140,23 +95,15 @@ func TestLogEventHandlerPreservesOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to read events log:", err)
 	}
-	got := string(content)
-	prev := -1
-	for _, line := range strings.Split(got, "\n") {
-		if !strings.HasPrefix(line, "title-") {
-			continue
-		}
-		var idx int
-		if _, err := fmt.Sscanf(line, "title-%d", &idx); err != nil {
-			t.Fatalf("could not parse title line %q: %v", line, err)
-		}
-		if idx != prev+1 {
-			t.Fatalf("out-of-order entry: got title-%d after title-%d", idx, prev)
-		}
-		prev = idx
+	entries := parseEventsLog(content)
+	if len(entries) != n {
+		t.Fatalf("got %d entries, want %d", len(entries), n)
 	}
-	if prev != n-1 {
-		t.Fatalf("expected %d entries, last seen title-%d", n, prev)
+	for i, e := range entries {
+		want := fmt.Sprintf("title-%d", i)
+		if e.Title != want {
+			t.Fatalf("entry %d: title = %q, want %q", i, e.Title, want)
+		}
 	}
 }
 
@@ -319,9 +266,8 @@ func TestLogsJSONPaginationAndFilter(t *testing.T) {
 
 func TestLogsJSONReadsRotatedBackup(t *testing.T) {
 	dir := t.TempDir()
-	// Seed an old (rotated) log alongside a current one.
-	old := "*****START*****\n2024-01-01T00:00:00Z legacy\nold-title\nold-msg\n*****END*****\n"
-	cur := "*****START*****\n2025-01-01T00:00:00Z legacy\nnew-title\nnew-msg\n*****END*****\n"
+	old := `{"id":"a1","timestamp":"2024-01-01T00:00:00Z","type":"legacy","title":"old-title","message":["old-msg"]}` + "\n"
+	cur := `{"id":"a2","timestamp":"2025-01-01T00:00:00Z","type":"legacy","title":"new-title","message":["new-msg"]}` + "\n"
 	os.WriteFile(filepath.Join(dir, "events.log.1"), []byte(old), 0644)
 	os.WriteFile(filepath.Join(dir, "events.log"), []byte(cur), 0644)
 
@@ -335,7 +281,6 @@ func TestLogsJSONReadsRotatedBackup(t *testing.T) {
 	if resp.Total != 2 {
 		t.Errorf("total = %d, want 2", resp.Total)
 	}
-	// Newest first.
 	if resp.Entries[0].Title != "new-title" {
 		t.Errorf("first entry = %q, want new-title", resp.Entries[0].Title)
 	}
@@ -575,6 +520,147 @@ rules:
 	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
 	if len(got) != 0 {
 		t.Errorf("expected no log written, got: %s", got)
+	}
+}
+
+func TestTitleSearchFilter(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := NewAPI(dir)
+	titles := []string{"Login OK", "Login failed", "Order placed", "Cart cleared"}
+	for _, title := range titles {
+		body, _ := json.Marshal(Event{Type: "t", Title: title, Message: "x"})
+		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+		time.Sleep(time.Microsecond)
+	}
+	a.Close()
+
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+	rr := httptest.NewRecorder()
+	a2.logsJSONHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.json?q=login", nil))
+	var resp logsResponse
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Total != 2 {
+		t.Errorf("total = %d, want 2 for q=login", resp.Total)
+	}
+	for _, e := range resp.Entries {
+		if !strings.Contains(strings.ToLower(e.Title), "login") {
+			t.Errorf("unexpected match: %q", e.Title)
+		}
+	}
+}
+
+func TestDeleteSingleByID(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := NewAPI(dir)
+	for _, title := range []string{"a", "b", "c"} {
+		body, _ := json.Marshal(Event{Type: "t", Title: title, Message: "m"})
+		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+		time.Sleep(time.Microsecond)
+	}
+	a.Close()
+
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+	entries := a2.readAllEvents()
+	if len(entries) != 3 {
+		t.Fatalf("setup: got %d entries", len(entries))
+	}
+	target := entries[1] // middle one (any will do)
+
+	req := httptest.NewRequest(http.MethodDelete, "/logs/"+target.ID, nil)
+	req.SetPathValue("id", target.ID)
+	rr := httptest.NewRecorder()
+	a2.deleteLogByIDHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	left := a2.readAllEvents()
+	if len(left) != 2 {
+		t.Fatalf("after delete: got %d entries, want 2", len(left))
+	}
+	for _, e := range left {
+		if e.ID == target.ID {
+			t.Errorf("deleted entry still present: %+v", e)
+		}
+	}
+
+	// Deleting again returns 404.
+	req2 := httptest.NewRequest(http.MethodDelete, "/logs/"+target.ID, nil)
+	req2.SetPathValue("id", target.ID)
+	rr2 := httptest.NewRecorder()
+	a2.deleteLogByIDHandler(rr2, req2)
+	if rr2.Code != http.StatusNotFound {
+		t.Errorf("second delete status = %d, want 404", rr2.Code)
+	}
+}
+
+func TestDeleteAllAndKeepWriting(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := NewAPI(dir)
+	for _, title := range []string{"a", "b", "c"} {
+		body, _ := json.Marshal(Event{Type: "t", Title: title, Message: "m"})
+		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	}
+	// Don't close — make sure delete works on a live writer and writes
+	// continue to work afterward.
+	rr := httptest.NewRecorder()
+	a.deleteLogsHandler(rr, httptest.NewRequest(http.MethodDelete, "/logs", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete status = %d", rr.Code)
+	}
+	if entries := a.readAllEvents(); len(entries) != 0 {
+		t.Errorf("after delete-all: got %d entries", len(entries))
+	}
+
+	// New writes should continue to work.
+	body, _ := json.Marshal(Event{Type: "t", Title: "after", Message: "m"})
+	a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	a.Close()
+
+	entries := a.readAllEvents()
+	if len(entries) != 1 || entries[0].Title != "after" {
+		t.Errorf("post-delete write missing or wrong: %+v", entries)
+	}
+}
+
+func TestDeleteWithTypeAndQueryFilter(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := NewAPI(dir)
+	type evt struct{ typ, title string }
+	for _, e := range []evt{
+		{"alpha", "Login OK"},
+		{"alpha", "Login failed"},
+		{"alpha", "Order placed"},
+		{"beta", "Login error"},
+	} {
+		body, _ := json.Marshal(Event{Type: e.typ, Title: e.title, Message: "m"})
+		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+		time.Sleep(time.Microsecond)
+	}
+
+	// Delete alpha+login → should remove the two alpha login entries only.
+	rr := httptest.NewRecorder()
+	a.deleteLogsHandler(rr, httptest.NewRequest(http.MethodDelete, "/logs?type=alpha&q=login", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	a.Close()
+
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+	entries := a2.readAllEvents()
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+	titles := []string{}
+	for _, e := range entries {
+		titles = append(titles, e.Title)
+	}
+	sort.Strings(titles)
+	if titles[0] != "Login error" || titles[1] != "Order placed" {
+		t.Errorf("survivors = %v, want [Login error, Order placed]", titles)
 	}
 }
 
