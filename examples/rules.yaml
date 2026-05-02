@@ -1,0 +1,40 @@
+# Example rules.yaml — copy to ~/.temporal/rules.yaml.
+#
+# Each incoming POST /events body is checked against these rules in order.
+# The first match wins. Match fields are all optional except path. Templates
+# use {gjson.path} placeholders against the request body; missing paths
+# render as empty strings.
+
+rules:
+  # Log every successful login attempt forwarded by Proxyman onResponse.
+  - name: user_login
+    match:
+      host: api.example.com
+      path: /api/login
+      method: POST
+      status: "2xx"
+    extract:
+      type: "user_action"
+      title: "Login OK: {request.body.user.name}"
+      message: "ip={request.headers.X-Forwarded-For}"
+
+  # Capture all server errors under /api/* regardless of method.
+  - name: api_error
+    match:
+      path: /api/*
+      status: "5xx"
+    extract:
+      type: "error"
+      title: "{response.statusCode} {request.method} {request.path}"
+      message: "{response.body.error}"
+
+  # Generic onRequest log — fires when a payload has no response (e.g.
+  # forwarded from onRequest only). No `status` constraint.
+  - name: api_request
+    match:
+      host: api.example.com
+      path: /api/*
+    extract:
+      type: "request"
+      title: "{request.method} {request.path}"
+      message: "{request.body}"

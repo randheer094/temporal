@@ -75,37 +75,65 @@ MESSAGE
 
 ### Rule-based ingestion
 
-The same `POST /events` endpoint also accepts arbitrary JSON shapes. If the body carries a top-level `url` (and optional `method`) field that matches a rule in `~/.temporal/rules.yaml`, the rule's `extract` templates render the log entry; otherwise the body is decoded as the legacy `{type,title,message}` event.
+The same `POST /events` endpoint also accepts arbitrary JSON shapes. The daemon resolves a target (host, path, method, response status) from the body and runs it against `~/.temporal/rules.yaml`. The first matching rule's `extract` templates render the log entry. If no rule matches, the body is decoded as the legacy `{type,title,message}` event (empty payloads return 400). Bodies may also be a JSON **array** — each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
 
-Bodies may also be a JSON **array** — each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
-
-`rules.yaml`:
+#### Rule format
 
 ```yaml
 rules:
   - name: user_login
     match:
-      path: /api/login   # matches body.url; supports prefix with trailing /*
-      method: POST       # optional; matches body.method (case-insensitive)
+      host: api.example.com   # optional; case-insensitive exact
+      path: /api/login        # exact, or trailing /* for prefix
+      method: POST            # optional; case-insensitive
+      status: "2xx"           # optional; "200", "2xx" / "4xx" / "5xx"
     extract:
       type: "user_action"
-      title: "Login: {user.name}"
-      message: "{event.message} from {meta.ip}"
+      title: "Login: {request.body.user.name}"
+      message: "status={response.statusCode} ip={request.headers.X-Forwarded-For}"
 ```
 
-Templates use `{gjson.path}` placeholders against the request body. Deep paths, array indexing, and gjson queries are supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings. The file is reloaded on every request, so edits take effect without a restart.
+A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings. `rules.yaml` is reloaded on every request, so edits take effect without a restart.
 
-Example request:
+#### Target resolution
+
+The daemon picks `host`, `path`, `method`, and `statusCode` from the body in this priority:
+
+| Field      | Lookup order                                           |
+| ---------- | ------------------------------------------------------ |
+| host       | parsed from `url` → `host` → `request.host` → `request.url` |
+| path       | parsed from `url` → `path` → `request.path` → `request.url` |
+| method     | `method` → `request.method`                            |
+| statusCode | `status` → `statusCode` → `response.statusCode`        |
+
+`url` may be a full URL (`https://api.example.com/v1/x?ref=foo`) or a bare path. Query strings are stripped before matching.
+
+#### Proxyman integration
+
+Drop [`examples/proxyman-forward.js`](examples/proxyman-forward.js) into a Proxyman script (Tools → Scripting). It forwards every intercepted request and/or response to `http://localhost:8005/events` using `$http.post` (macOS) or `axios.post` (Windows/Linux). Each forward looks like:
+
+```json
+{
+  "url": "https://api.example.com/api/login?ref=abc",
+  "method": "POST",
+  "request":  { "host": "api.example.com", "path": "/api/login", "method": "POST",
+                "headers": {...}, "body": {...} },
+  "response": { "statusCode": 200, "headers": {...}, "body": {...} }
+}
+```
+
+Both `onRequest` and `onResponse` hooks are supported — for request-only forwards, just omit the `response` block (or use a rule without a `status` constraint). See [`examples/rules.yaml`](examples/rules.yaml) for a working starting point.
+
+#### Direct curl example
 
 ```bash
 curl -X POST http://localhost:8005/events \
   -H 'Content-Type: application/json' \
   -d '{
-    "url": "/api/login",
+    "url": "https://api.example.com/api/login",
     "method": "POST",
-    "user": { "name": "jane" },
-    "event": { "message": "logged in" },
-    "meta": { "ip": "1.2.3.4" }
+    "request":  { "body": { "user": { "name": "jane" } } },
+    "response": { "statusCode": 200, "body": { "ok": true } }
   }'
 ```
 

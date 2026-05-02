@@ -119,14 +119,13 @@ func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Error decoding JSON", http.StatusBadRequest)
 }
 
-// processItem tries the rules engine first (matching on the body's "url"
-// and optional "method" fields), then falls back to the legacy Event shape.
-// Returns true when the item was queued for write.
+// processItem tries the rules engine first by extracting host/path/method/
+// status from the body (via rules.ExtractTarget) and falls back to the
+// legacy Event shape. Returns true when the item was queued for write.
 func (a *API) processItem(rs *rules.RuleSet, body []byte) bool {
 	if rs != nil && len(rs.Rules) > 0 {
-		url := gjson.GetBytes(body, "url").String()
-		method := gjson.GetBytes(body, "method").String()
-		if rule := rs.Find(method, url); rule != nil {
+		target := rules.ExtractTarget(body)
+		if rule := rs.Find(target); rule != nil {
 			res := rule.Apply(body)
 			a.writeEvent(res.Type, res.Title, res.Message)
 			return true
@@ -134,6 +133,11 @@ func (a *API) processItem(rs *rules.RuleSet, body []byte) bool {
 	}
 	var entry Event
 	if err := json.Unmarshal(body, &entry); err != nil {
+		return false
+	}
+	// Reject empty payloads so a no-rule-match Proxyman-style body returns
+	// 400 instead of writing a blank event.
+	if entry.Type == "" && entry.Title == "" && entry.Message == "" {
 		return false
 	}
 	a.writeEvent(entry.Type, entry.Title, entry.Message)

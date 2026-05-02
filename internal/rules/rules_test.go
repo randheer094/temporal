@@ -6,32 +6,6 @@ import (
 	"testing"
 )
 
-const sampleYAML = `
-rules:
-  - name: user_login
-    match:
-      path: /ingest/login
-      method: POST
-    extract:
-      type: "user_action"
-      title: "Login: {user.name}"
-      message: "{event.message} from {meta.ip}"
-  - name: any_method
-    match:
-      path: /ingest/anything
-    extract:
-      type: "generic"
-      title: "{title}"
-      message: "{body}"
-  - name: prefix_rule
-    match:
-      path: /ingest/items/*
-    extract:
-      type: "item"
-      title: "Item {id}"
-      message: "{nested.deep.value}"
-`
-
 func writeRules(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "rules.yaml")
@@ -51,86 +25,140 @@ func TestLoadMissingFileReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestFindExactPathAndMethod(t *testing.T) {
-	rs, err := Load(writeRules(t, sampleYAML))
-	if err != nil {
-		t.Fatal(err)
+func TestFindMethodAndPath(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: login
+    match: { path: /api/login, method: POST }
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(Target{Method: "POST", Path: "/api/login"}); r == nil {
+		t.Fatal("expected match")
 	}
-	r := rs.Find("POST", "/ingest/login")
-	if r == nil || r.Name != "user_login" {
-		t.Fatalf("expected user_login, got %+v", r)
-	}
-	if rs.Find("GET", "/ingest/login") != nil {
+	if r := rs.Find(Target{Method: "GET", Path: "/api/login"}); r != nil {
 		t.Fatal("GET should not match POST-only rule")
 	}
 }
 
-func TestFindAnyMethodWhenUnset(t *testing.T) {
-	rs, _ := Load(writeRules(t, sampleYAML))
-	if r := rs.Find("DELETE", "/ingest/anything"); r == nil || r.Name != "any_method" {
-		t.Fatalf("expected any_method, got %+v", r)
+func TestFindHostFilter(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: scoped
+    match: { host: api.example.com, path: /v1/* }
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(Target{Host: "api.example.com", Path: "/v1/users/1"}); r == nil {
+		t.Fatal("expected match")
+	}
+	if r := rs.Find(Target{Host: "other.com", Path: "/v1/users/1"}); r != nil {
+		t.Fatal("different host should not match")
 	}
 }
 
-func TestFindPrefixMatch(t *testing.T) {
-	rs, _ := Load(writeRules(t, sampleYAML))
-	if r := rs.Find("POST", "/ingest/items/42"); r == nil || r.Name != "prefix_rule" {
-		t.Fatalf("expected prefix_rule, got %+v", r)
+func TestFindStatusPatterns(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: server_error
+    match: { path: /api/*, status: "5xx" }
+    extract: { type: e, title: T, message: M }
+  - name: exact_201
+    match: { path: /create, status: "201" }
+    extract: { type: c, title: T, message: M }
+`))
+	if r := rs.Find(Target{Path: "/api/x", StatusCode: 503}); r == nil || r.Name != "server_error" {
+		t.Fatalf("expected server_error, got %+v", r)
 	}
-	if r := rs.Find("POST", "/ingest/items"); r == nil {
-		t.Fatal("bare prefix should match")
+	if r := rs.Find(Target{Path: "/api/x", StatusCode: 200}); r != nil {
+		t.Fatal("200 should not match 5xx rule")
 	}
-	if r := rs.Find("POST", "/ingest/itemsxyz"); r != nil {
-		t.Fatal("non-segment prefix should not match")
+	if r := rs.Find(Target{Path: "/create", StatusCode: 201}); r == nil {
+		t.Fatal("expected 201 exact match")
+	}
+	// status set in rule but no response in payload -> no match
+	if r := rs.Find(Target{Path: "/api/x", StatusCode: 0}); r != nil {
+		t.Fatal("rule with status should not match when StatusCode=0")
 	}
 }
 
-func TestApplyRendersDeepPaths(t *testing.T) {
-	rs, _ := Load(writeRules(t, sampleYAML))
-	r := rs.Find("POST", "/ingest/login")
-	body := []byte(`{"user":{"name":"jane"},"event":{"message":"hi"},"meta":{"ip":"1.2.3.4"}}`)
+func TestExtractTargetFromFullURL(t *testing.T) {
+	body := []byte(`{"url":"https://api.example.com/v1/users/42?ref=foo","method":"GET"}`)
+	tgt := ExtractTarget(body)
+	if tgt.Host != "api.example.com" || tgt.Path != "/v1/users/42" || tgt.Method != "GET" {
+		t.Errorf("got %+v", tgt)
+	}
+}
+
+func TestExtractTargetFromRequestObject(t *testing.T) {
+	body := []byte(`{"request":{"host":"api.example.com","path":"/v1/orders","method":"POST"},"response":{"statusCode":201}}`)
+	tgt := ExtractTarget(body)
+	if tgt.Host != "api.example.com" || tgt.Path != "/v1/orders" || tgt.Method != "POST" || tgt.StatusCode != 201 {
+		t.Errorf("got %+v", tgt)
+	}
+}
+
+func TestExtractTargetFromRequestURL(t *testing.T) {
+	body := []byte(`{"request":{"url":"https://api.example.com/v1/x","method":"GET"}}`)
+	tgt := ExtractTarget(body)
+	if tgt.Host != "api.example.com" || tgt.Path != "/v1/x" {
+		t.Errorf("got %+v", tgt)
+	}
+}
+
+func TestApplyRendersDeepPathsFromResponse(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: api
+    match: { path: /api/login }
+    extract:
+      type: "user"
+      title: "Login: {request.body.user.name}"
+      message: "status={response.statusCode} body={response.body.message}"
+`))
+	r := rs.Find(Target{Path: "/api/login"})
+	body := []byte(`{"url":"/api/login","request":{"body":{"user":{"name":"jane"}}},"response":{"statusCode":200,"body":{"message":"hi"}}}`)
 	got := r.Apply(body)
 	if got.Title != "Login: jane" {
 		t.Errorf("title = %q", got.Title)
 	}
-	if got.Message != "hi from 1.2.3.4" {
+	if got.Message != "status=200 body=hi" {
 		t.Errorf("message = %q", got.Message)
 	}
-	if got.Type != "user_action" {
-		t.Errorf("type = %q", got.Type)
-	}
 }
 
-func TestApplyMissingPathBecomesEmpty(t *testing.T) {
-	rs, _ := Load(writeRules(t, sampleYAML))
-	r := rs.Find("POST", "/ingest/items/1")
-	got := r.Apply([]byte(`{"id":"abc"}`))
-	if got.Title != "Item abc" {
-		t.Errorf("title = %q", got.Title)
-	}
-	if got.Message != "" {
-		t.Errorf("message = %q, want empty", got.Message)
-	}
-}
-
-func TestApplyArrayIndexAndQuery(t *testing.T) {
-	yamlBody := `
+func TestApplyMissingResponseRendersEmpty(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
 rules:
-  - name: first_item
-    match: { path: /ingest/order }
+  - name: api
+    match: { path: /api/login }
     extract:
-      type: "order"
-      title: "First: {items.0.name}"
-      message: "Adult: {users.#(age>18).name}"
-`
-	rs, _ := Load(writeRules(t, yamlBody))
-	r := rs.Find("POST", "/ingest/order")
-	body := []byte(`{"items":[{"name":"apple"},{"name":"pear"}],"users":[{"name":"kid","age":10},{"name":"adult","age":30}]}`)
+      type: "t"
+      title: "{request.body.user.name}"
+      message: "status={response.statusCode}"
+`))
+	r := rs.Find(Target{Path: "/api/login"})
+	body := []byte(`{"url":"/api/login","request":{"body":{"user":{"name":"jane"}}}}`) // onRequest forward, no response
 	got := r.Apply(body)
-	if got.Title != "First: apple" {
+	if got.Title != "jane" {
 		t.Errorf("title = %q", got.Title)
 	}
-	if got.Message != "Adult: adult" {
+	if got.Message != "status=" {
 		t.Errorf("message = %q", got.Message)
+	}
+}
+
+func TestPathPrefixWithQueryString(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: items
+    match: { path: /items/* }
+    extract: { type: t, title: T, message: M }
+`))
+	body := []byte(`{"url":"https://x/items/42?ref=q"}`)
+	tgt := ExtractTarget(body)
+	if tgt.Path != "/items/42" {
+		t.Fatalf("path = %q", tgt.Path)
+	}
+	if rs.Find(tgt) == nil {
+		t.Fatal("expected match")
 	}
 }

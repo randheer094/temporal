@@ -340,6 +340,147 @@ func TestLogsJSONReadsRotatedBackup(t *testing.T) {
 	}
 }
 
+func TestProxymanFullURLAndHostMatch(t *testing.T) {
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: example_login
+    match:
+      host: api.example.com
+      path: /api/login
+      method: POST
+    extract:
+      type: "auth"
+      title: "{request.method} {request.path}"
+      message: "user={request.body.user.name}"
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{
+		"url": "https://api.example.com/api/login?ref=abc",
+		"method": "POST",
+		"request": {
+			"host": "api.example.com",
+			"path": "/api/login",
+			"method": "POST",
+			"body": {"user": {"name": "jane"}}
+		}
+	}`)
+	rr := httptest.NewRecorder()
+	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	a.Close()
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
+	s := string(got)
+	for _, want := range []string{"auth", "POST /api/login", "user=jane"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("log missing %q\n%s", want, s)
+		}
+	}
+}
+
+func TestProxymanWrongHostDoesNotMatch(t *testing.T) {
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: scoped
+    match: { host: api.example.com, path: /v1/x }
+    extract: { type: t, title: T, message: M }
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"url":"https://other.com/v1/x"}`)
+	rr := httptest.NewRecorder()
+	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	a.Close()
+
+	// No rule matches and the body isn't a legacy Event — expect 400.
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestProxymanResponseStatusFilter(t *testing.T) {
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: errors_only
+    match: { path: /api/*, status: "5xx" }
+    extract:
+      type: "error"
+      title: "{response.statusCode} {request.path}"
+      message: "{response.body.error}"
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 200 -> should not log (no rule matches).
+	ok := []byte(`{"url":"/api/x","request":{"path":"/api/x","method":"GET"},"response":{"statusCode":200,"body":{}}}`)
+	a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(ok)))
+
+	// 503 -> should log.
+	bad := []byte(`{"url":"/api/x","request":{"path":"/api/x","method":"GET"},"response":{"statusCode":503,"body":{"error":"oops"}}}`)
+	a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(bad)))
+
+	a.Close()
+	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
+	s := string(got)
+	if strings.Contains(s, "200 ") {
+		t.Errorf("200 should not have logged: %s", s)
+	}
+	if !strings.Contains(s, "503 /api/x") || !strings.Contains(s, "oops") {
+		t.Errorf("503 not logged correctly: %s", s)
+	}
+}
+
+func TestProxymanOnRequestForward(t *testing.T) {
+	// onRequest payload has no response; rules without a status constraint
+	// must still match.
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: with_status
+    match: { path: /api/*, status: "2xx" }
+    extract: { type: ok, title: T, message: M }
+  - name: any
+    match: { path: /api/* }
+    extract:
+      type: "request"
+      title: "{request.method} {request.path}"
+      message: "body={request.body.x}"
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"url":"https://api.example.com/api/foo","request":{"path":"/api/foo","method":"GET","body":{"x":42}}}`)
+	rr := httptest.NewRecorder()
+	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	a.Close()
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
+	s := string(got)
+	if !strings.Contains(s, "request") || !strings.Contains(s, "GET /api/foo") || !strings.Contains(s, "body=42") {
+		t.Errorf("missing onRequest log:\n%s", s)
+	}
+	// status-required rule should NOT have fired.
+	if strings.Contains(s, "ok\nT\nM") {
+		t.Errorf("status-required rule fired without response:\n%s", s)
+	}
+}
+
 func TestNewAPIErrorsOnBadLogDir(t *testing.T) {
 	dir := t.TempDir()
 	notADir := filepath.Join(dir, "file")
