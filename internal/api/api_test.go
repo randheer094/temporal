@@ -159,6 +159,187 @@ func TestLogEventHandlerPreservesOrder(t *testing.T) {
 	}
 }
 
+func writeRules(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuleBasedEventByURL(t *testing.T) {
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: user_login
+    match: { path: /api/login, method: POST }
+    extract:
+      type: "user_action"
+      title: "Login: {user.name}"
+      message: "{event.message} from {meta.ip}"
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"url":"/api/login","method":"POST","user":{"name":"jane"},"event":{"message":"hi"},"meta":{"ip":"1.2.3.4"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
+	rr := httptest.NewRecorder()
+	a.logEventHandler(rr, req)
+	a.Close()
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rr.Code, rr.Body.String())
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "events.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	for _, want := range []string{"user_action", "Login: jane", "hi from 1.2.3.4"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("log missing %q\n%s", want, s)
+		}
+	}
+}
+
+func TestArrayBodyProducesMultipleEvents(t *testing.T) {
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: order_item
+    match: { path: /api/order }
+    extract:
+      type: "order"
+      title: "Item {name}"
+      message: "qty {qty}"
+`)
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`[
+		{"url":"/api/order","name":"apple","qty":3},
+		{"url":"/api/order","name":"pear","qty":7}
+	]`)
+	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
+	rr := httptest.NewRecorder()
+	a.logEventHandler(rr, req)
+	a.Close()
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", rr.Code, rr.Body.String())
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
+	s := string(got)
+	if !strings.Contains(s, "Item apple") || !strings.Contains(s, "qty 3") {
+		t.Errorf("missing first item:\n%s", s)
+	}
+	if !strings.Contains(s, "Item pear") || !strings.Contains(s, "qty 7") {
+		t.Errorf("missing second item:\n%s", s)
+	}
+}
+
+func TestLegacyEventFallbackWhenNoRuleMatches(t *testing.T) {
+	dir := t.TempDir()
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(Event{Type: "legacy", Title: "t", Message: "m"})
+	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
+	rr := httptest.NewRecorder()
+	a.logEventHandler(rr, req)
+	a.Close()
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
+	if !strings.Contains(string(got), "legacy") {
+		t.Errorf("legacy event not written:\n%s", string(got))
+	}
+}
+
+func TestLogsJSONPaginationAndFilter(t *testing.T) {
+	dir := t.TempDir()
+	a, err := NewAPI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		body, _ := json.Marshal(Event{Type: "alpha", Title: fmt.Sprintf("a%d", i), Message: "m"})
+		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+		time.Sleep(time.Millisecond) // ensure timestamp ordering
+	}
+	for i := 0; i < 3; i++ {
+		body, _ := json.Marshal(Event{Type: "beta", Title: fmt.Sprintf("b%d", i), Message: "m"})
+		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+		time.Sleep(time.Millisecond)
+	}
+	a.Close()
+
+	// Reopen so the read sees the flushed file.
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+
+	rr := httptest.NewRecorder()
+	a2.logsJSONHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.json?page=1&size=10", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	var resp logsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 8 {
+		t.Errorf("total = %d, want 8", resp.Total)
+	}
+	if len(resp.Types) != 2 {
+		t.Errorf("types = %v, want [alpha beta]", resp.Types)
+	}
+
+	rr = httptest.NewRecorder()
+	a2.logsJSONHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.json?type=beta&size=2&page=1", nil))
+	var filtered logsResponse
+	json.Unmarshal(rr.Body.Bytes(), &filtered)
+	if filtered.Total != 3 {
+		t.Errorf("filtered total = %d, want 3", filtered.Total)
+	}
+	if len(filtered.Entries) != 2 {
+		t.Errorf("page size = %d, want 2", len(filtered.Entries))
+	}
+	if filtered.TotalPages != 2 {
+		t.Errorf("total_pages = %d, want 2", filtered.TotalPages)
+	}
+}
+
+func TestLogsJSONReadsRotatedBackup(t *testing.T) {
+	dir := t.TempDir()
+	// Seed an old (rotated) log alongside a current one.
+	old := "*****START*****\n2024-01-01T00:00:00Z legacy\nold-title\nold-msg\n*****END*****\n"
+	cur := "*****START*****\n2025-01-01T00:00:00Z legacy\nnew-title\nnew-msg\n*****END*****\n"
+	os.WriteFile(filepath.Join(dir, "events.log.1"), []byte(old), 0644)
+	os.WriteFile(filepath.Join(dir, "events.log"), []byte(cur), 0644)
+
+	a, _ := NewAPI(dir)
+	defer a.Close()
+
+	rr := httptest.NewRecorder()
+	a.logsJSONHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.json", nil))
+	var resp logsResponse
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Total != 2 {
+		t.Errorf("total = %d, want 2", resp.Total)
+	}
+	// Newest first.
+	if resp.Entries[0].Title != "new-title" {
+		t.Errorf("first entry = %q, want new-title", resp.Entries[0].Title)
+	}
+}
+
 func TestNewAPIErrorsOnBadLogDir(t *testing.T) {
 	dir := t.TempDir()
 	notADir := filepath.Join(dir, "file")
