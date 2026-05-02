@@ -227,9 +227,10 @@ The daemon serves a responsive web UI at `http://localhost:8005/logs` for browsi
 - Pagination (configurable page size).
 - Filter by `type` (dropdown).
 - Title search (case-insensitive substring).
-- Optional auto-refresh.
+- Optional auto-refresh (5s; entries are diffed across refreshes so the list doesn't flicker).
 - Per-entry delete (× button).
 - "Delete all" / "Delete N matching" — the header button honors both filters.
+- CSV export of the current filter (`type` and `q`) via the **Export CSV** button or `/logs.csv?type=&q=`. Entries with multiple message lines produce one row per line, with `timestamp`, `type`, and `title` repeated.
 
 The same data is available as JSON at `/logs.json?page=&size=&type=&q=`.
 

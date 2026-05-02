@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -259,6 +260,7 @@ func (a *API) routes() *http.ServeMux {
 	mux.HandleFunc("/events", a.logEventHandler)
 	mux.HandleFunc("GET /logs", a.logsPageHandler)
 	mux.HandleFunc("GET /logs.json", a.logsJSONHandler)
+	mux.HandleFunc("GET /logs.csv", a.logsCSVHandler)
 	mux.HandleFunc("DELETE /logs", a.deleteLogsHandler)
 	mux.HandleFunc("DELETE /logs/{id}", a.deleteLogByIDHandler)
 	mux.HandleFunc("/api/docs/", httpSwagger.Handler(
@@ -331,6 +333,38 @@ func (a *API) logsJSONHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// logsCSVHandler streams a CSV export of all entries that match the same
+// ?type= and ?q= filters /logs.json uses (no pagination — the full filtered
+// set). Each entry produces one row per message line; entries with no
+// messages still produce a single row with an empty message column.
+func (a *API) logsCSVHandler(w http.ResponseWriter, r *http.Request) {
+	typeFilter := r.URL.Query().Get("type")
+	query := r.URL.Query().Get("q")
+
+	entries := a.readAllEvents()
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Timestamp > entries[j].Timestamp
+	})
+	entries = applyFilters(entries, typeFilter, query)
+
+	filename := "temporal-logs-" + time.Now().UTC().Format("20060102-150405") + ".csv"
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+
+	cw := csv.NewWriter(w)
+	cw.Write([]string{"timestamp", "type", "title", "message"})
+	for _, e := range entries {
+		if len(e.Message) == 0 {
+			cw.Write([]string{e.Timestamp, e.Type, e.Title, ""})
+			continue
+		}
+		for _, m := range e.Message {
+			cw.Write([]string{e.Timestamp, e.Type, e.Title, m})
+		}
+	}
+	cw.Flush()
 }
 
 // readAllEvents merges the active log and the rotated backup so the UI can
