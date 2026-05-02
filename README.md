@@ -51,23 +51,24 @@ A daemon that exposes a REST endpoint for logging events. It manages its own pro
 
 ### Logging an event
 
-The daemon listens on `http://localhost:8005/events`. Send a POST request:
+The daemon listens on `http://localhost:8005/events`. POST any JSON body — what gets logged is fully determined by `~/.temporal/rules.yaml` (see [Rule-based ingestion](#rule-based-ingestion)). With no matching rule, the body is dropped.
 
 ```bash
 curl -X POST http://localhost:8005/events \
   -H 'Content-Type: application/json' \
   -d '{
-    "type": "user_action",
-    "title": "User login attempt",
-    "message": "User john.doe tried to log in from IP 192.168.1.100"
+    "url": "/api/login",
+    "method": "POST",
+    "user": {"name": "john.doe"},
+    "meta": {"ip": "192.168.1.100"}
   }'
 ```
 
-Each event is appended to `~/.temporal/events.log` as a single JSON line — see [Logs viewer](#logs-viewer) for the exact schema.
+Logged events are appended to `~/.temporal/events.log` as a single JSON line — see [Logs viewer](#logs-viewer) for the exact schema.
 
 ### Rule-based ingestion
 
-The same `POST /events` endpoint accepts arbitrary JSON shapes. The daemon resolves a target (host, path, method, response status) from the body and runs it against `~/.temporal/rules.yaml`. The first matching rule's `extract` templates render the log entry. If no rule matches, the body is decoded as the legacy `{type,title,message}` event. Bodies may also be a JSON **array** — each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
+`POST /events` accepts arbitrary JSON shapes. The daemon resolves a target (host, path, method, response status) from the body and runs it against `~/.temporal/rules.yaml`. The first matching rule's `extract` templates render the log entry. Bodies that don't match any rule are dropped — there is no fallback shape. Bodies may also be a JSON **array**, in which case each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
 
 The endpoint **always returns `200 OK`**. The JSON response carries a `status` field of `"ok"` (something was logged), `"no_match"` (nothing logged), or `"ignored"` (request not processable). Empty extractions are skipped — a rule whose templates all render to empty strings produces no log entry.
 

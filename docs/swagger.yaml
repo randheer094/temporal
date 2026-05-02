@@ -1,13 +1,3 @@
-definitions:
-  server.Event:
-    properties:
-      message:
-        type: string
-      title:
-        type: string
-      type:
-        type: string
-    type: object
 info:
   contact: {}
 paths:
@@ -15,15 +5,16 @@ paths:
     post:
       consumes:
       - application/json
-      description: Log an event
+      description: Accepts arbitrary JSON (object or array); rules.yaml extracts log
+        entries.
       operationId: log-event
       parameters:
-      - description: Log Entry
+      - description: Arbitrary JSON payload
         in: body
-        name: entry
+        name: body
         required: true
         schema:
-          $ref: '#/definitions/server.Event'
+          type: object
       produces:
       - application/json
       responses:

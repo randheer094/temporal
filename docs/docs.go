@@ -17,7 +17,7 @@ const docTemplate = `{
     "paths": {
         "/events": {
             "post": {
-                "description": "Log an event",
+                "description": "Accepts arbitrary JSON (object or array); rules.yaml extracts log entries.",
                 "consumes": [
                     "application/json"
                 ],
@@ -28,12 +28,12 @@ const docTemplate = `{
                 "operationId": "log-event",
                 "parameters": [
                     {
-                        "description": "Log Entry",
-                        "name": "entry",
+                        "description": "Arbitrary JSON payload",
+                        "name": "body",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/server.Event"
+                            "type": "object"
                         }
                     }
                 ],
@@ -47,22 +47,6 @@ const docTemplate = `{
                             }
                         }
                     }
-                }
-            }
-        }
-    },
-    "definitions": {
-        "server.Event": {
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string"
-                },
-                "title": {
-                    "type": "string"
-                },
-                "type": {
-                    "type": "string"
                 }
             }
         }
