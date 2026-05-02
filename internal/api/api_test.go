@@ -700,6 +700,108 @@ func TestDeleteWithTypeAndQueryFilter(t *testing.T) {
 	}
 }
 
+func TestLogsCSVExport(t *testing.T) {
+	dir := t.TempDir()
+	writePassthroughRules(t, dir)
+	a, _ := NewAPI(dir)
+	type evt struct{ typ, title, msg string }
+	for _, e := range []evt{
+		{"alpha", "Login OK", "ip=1.2.3.4"},
+		{"alpha", "Login failed", "ip=5.6.7.8"},
+		{"beta", "Order placed", "id=42"},
+	} {
+		body, _ := json.Marshal(eventBody{Type: e.typ, Title: e.title, Message: e.msg})
+		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+		time.Sleep(time.Millisecond)
+	}
+	a.Close()
+
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+
+	// No filter — should include all 3 entries.
+	rr := httptest.NewRecorder()
+	a2.logsCSVHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.csv", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Errorf("content-type = %q, want text/csv*", ct)
+	}
+	if cd := rr.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, ".csv") {
+		t.Errorf("content-disposition = %q", cd)
+	}
+	out := rr.Body.String()
+	if !strings.HasPrefix(out, "timestamp,type,title,message\n") {
+		t.Errorf("missing header row, got: %q", out)
+	}
+	for _, want := range []string{"Login OK", "ip=1.2.3.4", "Login failed", "Order placed", "id=42"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("CSV missing %q\n%s", want, out)
+		}
+	}
+	// Header + 3 entries = 4 lines (each entry has a single message).
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 4 {
+		t.Errorf("got %d lines, want 4:\n%s", len(lines), out)
+	}
+
+	// Filtered — type=alpha&q=login should yield exactly 2 entries.
+	rr = httptest.NewRecorder()
+	a2.logsCSVHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.csv?type=alpha&q=login", nil))
+	out = rr.Body.String()
+	lines = strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 { // header + 2 rows
+		t.Errorf("filtered: got %d lines, want 3:\n%s", len(lines), out)
+	}
+	if strings.Contains(out, "Order placed") {
+		t.Errorf("filtered CSV should not include beta entry:\n%s", out)
+	}
+}
+
+func TestLogsCSVExportExplodesMessages(t *testing.T) {
+	// An entry with multiple message lines should produce one CSV row per
+	// line, matching the user-requested format.
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: multi
+    match: { path: /api/x }
+    extract:
+      type: "user_action"
+      title: "Login"
+      message:
+        - "ip={ip}"
+        - "ua={ua}"
+        - "session={sid}"
+`)
+	a, _ := NewAPI(dir)
+	body := []byte(`{"url":"/api/x","ip":"1.2.3.4","ua":"curl","sid":"abc"}`)
+	a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
+	a.Close()
+
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+	rr := httptest.NewRecorder()
+	a2.logsCSVHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.csv", nil))
+	out := rr.Body.String()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	// header + 3 message rows
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4:\n%s", len(lines), out)
+	}
+	for _, want := range []string{"ip=1.2.3.4", "ua=curl", "session=abc"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in CSV:\n%s", want, out)
+		}
+	}
+	// Title and type should repeat on every row.
+	loginCount := strings.Count(out, ",Login,")
+	if loginCount != 3 {
+		t.Errorf("title repeats = %d, want 3:\n%s", loginCount, out)
+	}
+}
+
 func TestNewAPIErrorsOnBadLogDir(t *testing.T) {
 	dir := t.TempDir()
 	notADir := filepath.Join(dir, "file")
