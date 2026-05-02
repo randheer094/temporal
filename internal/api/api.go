@@ -9,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"temporal/docs"
 	"temporal/internal/filewriter"
 	"temporal/internal/rules"
@@ -48,6 +50,12 @@ type API struct {
 	daemon    *filewriter.Writer
 	rulesPath string
 
+	// rules is loaded on startup and refreshed on SIGHUP (or via ReloadRules).
+	// Holding the file off the hot path avoids re-reading + re-parsing
+	// rules.yaml on every incoming event.
+	rulesMu sync.RWMutex
+	rules   *rules.RuleSet
+
 	// writeMu serializes writes against deletions. Writes hold it for the
 	// brief queue-send; delete handlers hold it across the rewrite.
 	writeMu sync.Mutex
@@ -66,12 +74,37 @@ func NewAPI(logDir string) (*API, error) {
 		events.Close()
 		return nil, err
 	}
-	return &API{
+	a := &API{
 		logDir:    logDir,
 		events:    events,
 		daemon:    daemon,
 		rulesPath: filepath.Join(logDir, "rules.yaml"),
-	}, nil
+	}
+	a.ReloadRules()
+	return a, nil
+}
+
+// ReloadRules re-reads and re-parses rules.yaml, swapping in the new rule set
+// on success. On parse failure the previous rule set is kept unchanged so the
+// daemon doesn't suddenly start dropping every event because of a typo.
+func (a *API) ReloadRules() error {
+	rs, err := rules.Load(a.rulesPath)
+	if err != nil {
+		a.logDaemon("rules load failed: " + err.Error())
+		a.rulesMu.Lock()
+		if a.rules == nil {
+			// First load failed — fall back to an empty set so the handler
+			// has something to consult.
+			a.rules = &rules.RuleSet{}
+		}
+		a.rulesMu.Unlock()
+		return err
+	}
+	a.rulesMu.Lock()
+	a.rules = rs
+	a.rulesMu.Unlock()
+	a.logDaemon(fmt.Sprintf("rules reloaded (%d rules)", len(rs.Rules)))
+	return nil
 }
 
 func (a *API) Close() {
@@ -104,10 +137,9 @@ func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	rs, rulesErr := rules.Load(a.rulesPath)
-	if rulesErr != nil {
-		a.logDaemon("rules load failed: " + rulesErr.Error())
-	}
+	a.rulesMu.RLock()
+	rs := a.rules
+	a.rulesMu.RUnlock()
 
 	written := 0
 	if isJSONArray(body) {
@@ -202,11 +234,24 @@ func respondOK(w http.ResponseWriter, status string) {
 func (a *API) Run() {
 	docs.SwaggerInfo.BasePath = "/"
 	mux := a.routes()
+	a.watchSignals()
 	a.logDaemon("Server starting on port 8005...")
 	if err := http.ListenAndServe(":8005", mux); err != nil {
 		a.logDaemon(fmt.Sprintf("Server failed to start: %v", err))
 		log.Fatal("Server failed to start:", err)
 	}
+}
+
+// watchSignals reloads rules on SIGHUP. The CLI's `temporal server rules`
+// command sends this signal to the daemon PID.
+func (a *API) watchSignals() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	go func() {
+		for range ch {
+			a.ReloadRules()
+		}
+	}()
 }
 
 func (a *API) routes() *http.ServeMux {

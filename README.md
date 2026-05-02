@@ -47,6 +47,7 @@ A daemon that exposes a REST endpoint for logging events. It manages its own pro
 | `temporal server start` | Start the daemon in the background. |
 | `temporal server stop` | Stop the running daemon. |
 | `temporal server status` | Check whether the daemon is running. |
+| `temporal server rules` | Validate `rules.yaml` and refresh the running daemon. |
 | `temporal server help` | Show help for the `server` subcommand. |
 
 ### Logging an event
@@ -90,7 +91,43 @@ rules:
         - "ip={request.headers.X-Forwarded-For}"
 ```
 
-A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings; empty messages are dropped from the array. `rules.yaml` is reloaded on every request, so edits take effect without a restart.
+A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings; empty messages are dropped from the array.
+
+`rules.yaml` is loaded once at daemon startup and cached. After editing the file, run `temporal server rules` — the command parses it locally first (so you see syntax errors immediately) and, if valid, sends the daemon SIGHUP to swap in the new rule set. A broken file never replaces a working one.
+
+#### Match operators
+
+Each field inside a `match` block is a separate test; **all** present fields must pass for that block to match. Omitted fields are wildcards.
+
+| Field    | Type   | Semantic                                                                                          |
+| -------- | ------ | ------------------------------------------------------------------------------------------------- |
+| `host`   | string | Case-insensitive exact comparison against the resolved host. Omit to allow any host.              |
+| `path`   | string | Exact match. Trailing `/*` makes it a prefix match (e.g. `/api/*` matches `/api/x` and `/api/x/y` but not `/apix`). Omit to allow any path. |
+| `method` | string | Case-insensitive exact comparison against the HTTP method. Omit to allow any method.              |
+| `status` | string | Either an exact 3-digit code (`"201"`) or an `Nxx` family (`"2xx"`/`"4xx"`/`"5xx"`). When set, the rule only matches payloads that carry a response status (request-only forwards are skipped). Omit to ignore status. |
+
+#### Multiple match / each / extract
+
+`match`, `each`, and `extract` each accept a single value **or** a list. The semantics:
+
+- **Multiple `match` blocks** — OR semantics. The rule fires if **any** block matches.
+- **Multiple `each` paths** — the resolved elements from every path are unioned into a single stream of context bodies (in the order the paths are listed).
+- **Multiple `extract` blocks** — each block renders against every context body and produces its own log entry. Empty entries are still dropped.
+
+If you combine all three, the entry count is `len(context bodies) × len(extracts)`. With no `each` the body itself is the single context.
+
+```yaml
+- name: orders_and_alerts
+  match:
+    - { host: api.example.com, path: /api/cart }
+    - { host: api.example.com, path: /api/order }
+  each:
+    - 'request.body.items.#(qty>0)#'
+    - 'request.body.alerts'
+  extract:
+    - { type: "cart_item", title: "{name}", message: "qty {qty}" }
+    - { type: "cart_audit", title: "{name}", message: "id {id}" }
+```
 
 `extract.message` accepts either a single string or a list of strings (rendered as separate lines in the log entry).
 
@@ -110,17 +147,36 @@ When a payload contains a list and you want **one log entry per matching item**,
       - "id {id}"
 ```
 
-Filter cheatsheet (gjson native):
-
-| `each` path                         | Meaning                              |
-| ----------------------------------- | ------------------------------------ |
-| `items.#(name%"*alert*")#`          | name matches wildcard                |
-| `items.#(qty>5)#`                   | numeric comparison                   |
-| `items.#(active==true)#`            | boolean                              |
-| `items.#(name%"*alert*"&qty>0)#`    | combined (AND)                       |
-| `items`                             | every element (no filter)            |
-
 If the path resolves to nothing, no entries are written.
+
+#### gjson operator reference
+
+Both template placeholders (`"{path}"`) and `each` paths use [gjson syntax](https://github.com/tidwall/gjson#path-syntax). The operators that come up most often:
+
+| Operator        | Where               | Meaning                                                                                          |
+| --------------- | ------------------- | ------------------------------------------------------------------------------------------------ |
+| `.`             | path                | Field separator. `request.body.user.name` walks four levels.                                     |
+| `0`, `1`, …     | path                | Array index. `items.0.name` reads the first item's name.                                          |
+| `#`             | path                | Length / "every element" marker. `items.#` is the count; `items.#.name` is each item's name.     |
+| `#(...)`        | path query          | First element matching the predicate.                                                            |
+| `#(...)#`       | path query          | All elements matching the predicate (returns a JSON array — required for `each` fan-out).        |
+| `==` / `!=`     | predicate           | Equality. `items.#(active==true)#`, `items.#(qty!=0)#`.                                          |
+| `<` / `<=` / `>` / `>=` | predicate   | Numeric comparison. `items.#(qty>5)#`.                                                           |
+| `%`             | predicate           | Wildcard pattern match (gjson "LIKE"). `*` matches any run of chars, `?` matches one. `name%"*alert*"`. Without wildcards behaves as exact match. |
+| `!%`            | predicate           | Inverse wildcard match.                                                                          |
+| `@this`         | path                | The whole document at this scope (gjson root selector).                                          |
+
+> **Compound predicates aren't supported.** gjson's `#(a&b)` / `#(a|b)` syntax is unreliable in practice — combinators may silently match nothing, or match everything. To express AND, set `each` to one filter and discard non-matches in the templates (or use two separate rules). To express OR, list multiple `each` paths (the union becomes the rule's context body stream).
+
+**Quoting gotcha:** YAML predicates like `%"foo"` contain literal double quotes. Always wrap the whole `each` value in **single** quotes, otherwise YAML will mis-parse the inner `"` and the entire rules file fails to load (every event then drops as `no_match`):
+
+```yaml
+each: 'items.#(name%"*alert*")#'   # ✓
+each: "items.#(name%\"*alert*\")#" # also works but ugly
+each: "items.#(name%"*alert*")#"   # ✗ YAML parse error
+```
+
+Empty rendered fields are dropped: an extract whose `type`, `title`, and every `message` line all render to empty strings produces no log entry.
 
 #### Target resolution
 

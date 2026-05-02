@@ -42,6 +42,64 @@ type Match struct {
 	Status string `yaml:"status"`
 }
 
+// Matches is the YAML form of a rule's match condition. It accepts either a
+// single mapping or a sequence of mappings; multiple entries are OR-ed (rule
+// fires if any one matches).
+type Matches []Match
+
+func (m *Matches) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case 0:
+		return nil
+	case yaml.MappingNode:
+		var single Match
+		if err := node.Decode(&single); err != nil {
+			return err
+		}
+		*m = Matches{single}
+		return nil
+	case yaml.SequenceNode:
+		var list []Match
+		if err := node.Decode(&list); err != nil {
+			return err
+		}
+		*m = Matches(list)
+		return nil
+	default:
+		return fmt.Errorf("rules: match must be a mapping or list of mappings")
+	}
+}
+
+// Eaches is the YAML form of a rule's `each` field. It accepts either a
+// single gjson path string or a list. The fan-out unions every path's
+// resolved elements into one stream of context bodies.
+type Eaches []string
+
+func (e *Eaches) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case 0:
+		return nil
+	case yaml.ScalarNode:
+		var s string
+		if err := node.Decode(&s); err != nil {
+			return err
+		}
+		if s != "" {
+			*e = Eaches{s}
+		}
+		return nil
+	case yaml.SequenceNode:
+		var list []string
+		if err := node.Decode(&list); err != nil {
+			return err
+		}
+		*e = Eaches(list)
+		return nil
+	default:
+		return fmt.Errorf("rules: each must be a string or list of strings")
+	}
+}
+
 // Extract holds the templates rendered for each event. Message is a list so
 // rules can produce multi-line / multi-section log messages; the YAML field
 // accepts either a single string or a list of strings.
@@ -87,11 +145,39 @@ func (e *Extract) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// Extracts is the YAML form of a rule's `extract` field. It accepts either a
+// single mapping or a sequence of mappings; each extract renders against
+// every context body and produces its own log entry.
+type Extracts []Extract
+
+func (e *Extracts) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case 0:
+		return nil
+	case yaml.MappingNode:
+		var single Extract
+		if err := node.Decode(&single); err != nil {
+			return err
+		}
+		*e = Extracts{single}
+		return nil
+	case yaml.SequenceNode:
+		var list []Extract
+		if err := node.Decode(&list); err != nil {
+			return err
+		}
+		*e = Extracts(list)
+		return nil
+	default:
+		return fmt.Errorf("rules: extract must be a mapping or list of mappings")
+	}
+}
+
 type Rule struct {
-	Name    string  `yaml:"name"`
-	Match   Match   `yaml:"match"`
-	Each    string  `yaml:"each"`
-	Extract Extract `yaml:"extract"`
+	Name     string   `yaml:"name"`
+	Matches  Matches  `yaml:"match"`
+	Eaches   Eaches   `yaml:"each"`
+	Extracts Extracts `yaml:"extract"`
 }
 
 type RuleSet struct {
@@ -147,26 +233,33 @@ func Load(path string) (*RuleSet, error) {
 	return &rs, nil
 }
 
-// Find returns the first rule that matches the target. Rules with a status
-// constraint only match when t.StatusCode > 0.
+// Find returns the first rule that matches the target. A rule with multiple
+// match blocks fires if any one block matches (OR). A rule with no match
+// block matches every target. Rules with a status constraint only match
+// when t.StatusCode > 0.
 func (rs *RuleSet) Find(t Target) *Rule {
 	for i := range rs.Rules {
 		r := &rs.Rules[i]
-		if !matchMethod(r.Match.Method, t.Method) {
-			continue
+		if r.matchesTarget(t) {
+			return r
 		}
-		if !matchHost(r.Match.Host, t.Host) {
-			continue
-		}
-		if !matchPath(r.Match.Path, t.Path) {
-			continue
-		}
-		if !matchStatus(r.Match.Status, t.StatusCode) {
-			continue
-		}
-		return r
 	}
 	return nil
+}
+
+func (r *Rule) matchesTarget(t Target) bool {
+	if len(r.Matches) == 0 {
+		return true
+	}
+	for _, m := range r.Matches {
+		if matchMethod(m.Method, t.Method) &&
+			matchHost(m.Host, t.Host) &&
+			matchPath(m.Path, t.Path) &&
+			matchStatus(m.Status, t.StatusCode) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchMethod(pattern, method string) bool {
@@ -312,47 +405,57 @@ var placeholder = regexp.MustCompile(`\{([^{}]+)\}`)
 
 // Apply runs the rule against a JSON body and returns zero or more results.
 //
-//   - With `each` unset: one Result rendered against the whole body.
-//   - With `each` set: the gjson path is resolved; each element becomes the
-//     body for one Result. If the path resolves to a single object, one
-//     Result is produced. Missing path or empty array → no Results.
+// Context bodies (one or more) are determined by `each`:
+//   - No `each`: the whole body is the single context.
+//   - One or more `each` paths: each path's resolved elements (or single
+//     object) are appended to a unioned stream of context bodies. Missing
+//     paths contribute nothing.
 //
-// Empty Results (all fields rendered empty) are filtered out so the
-// caller doesn't write blank log entries.
+// For every (context body × extract) pair, one Result is rendered. Empty
+// Results (all fields rendered empty) are filtered out so the caller
+// doesn't write blank log entries.
 func (r *Rule) Apply(jsonBody []byte) []Result {
 	bodies := r.contextBodies(jsonBody)
-	out := make([]Result, 0, len(bodies))
+	if len(r.Extracts) == 0 || len(bodies) == 0 {
+		return nil
+	}
+	out := make([]Result, 0, len(bodies)*len(r.Extracts))
 	for _, b := range bodies {
-		res := Result{
-			RuleName: r.Name,
-			Type:     render(r.Extract.Type, b),
-			Title:    render(r.Extract.Title, b),
-			Message:  renderMessages(r.Extract.Message, b),
-		}
-		if !res.Empty() {
-			out = append(out, res)
+		for _, ex := range r.Extracts {
+			res := Result{
+				RuleName: r.Name,
+				Type:     render(ex.Type, b),
+				Title:    render(ex.Title, b),
+				Message:  renderMessages(ex.Message, b),
+			}
+			if !res.Empty() {
+				out = append(out, res)
+			}
 		}
 	}
 	return out
 }
 
 func (r *Rule) contextBodies(jsonBody []byte) [][]byte {
-	if r.Each == "" {
+	if len(r.Eaches) == 0 {
 		return [][]byte{jsonBody}
 	}
-	got := gjson.GetBytes(jsonBody, r.Each)
-	if !got.Exists() {
-		return nil
+	var out [][]byte
+	for _, path := range r.Eaches {
+		got := gjson.GetBytes(jsonBody, path)
+		if !got.Exists() {
+			continue
+		}
+		if got.IsArray() {
+			got.ForEach(func(_, item gjson.Result) bool {
+				out = append(out, []byte(item.Raw))
+				return true
+			})
+		} else {
+			out = append(out, []byte(got.Raw))
+		}
 	}
-	if got.IsArray() {
-		var out [][]byte
-		got.ForEach(func(_, item gjson.Result) bool {
-			out = append(out, []byte(item.Raw))
-			return true
-		})
-		return out
-	}
-	return [][]byte{[]byte(got.Raw)}
+	return out
 }
 
 func render(tpl string, body []byte) string {
