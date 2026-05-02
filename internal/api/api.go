@@ -32,13 +32,6 @@ const (
 	eventsLogBackup         = "events.log.1"
 )
 
-// Event is the legacy POST /events payload (unchanged for backwards compat).
-type Event struct {
-	Type    string `json:"type"`
-	Title   string `json:"title"`
-	Message string `json:"message"`
-}
-
 // LogEntry is the on-disk and on-the-wire representation of a single event.
 // events.log is a JSON-lines file: one LogEntry per line.
 type LogEntry struct {
@@ -93,10 +86,9 @@ func (a *API) Close() {
 //
 // POST /events accepts arbitrary JSON (object or array). The body is matched
 // against rules.yaml; matching rules render templates via gjson and may
-// fan out across nested arrays via `each`. Bodies with no rule match fall
-// back to the legacy {type,title,message} Event shape. Writes are queued
-// by filewriter; the handler always returns 200 and only persists entries
-// when the rule produced non-empty output.
+// fan out across nested arrays via `each`. Bodies with no rule match are
+// dropped. Writes are queued by filewriter; the handler always returns 200
+// and only persists entries when a rule produced non-empty output.
 func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
 	a.logDaemon("Received request on " + r.URL.Path)
 	if r.Method != http.MethodPost {
@@ -134,33 +126,22 @@ func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, "ok")
 }
 
-// processItem applies any matching rule to the body, falling back to the
-// legacy Event shape when no rule matches. Returns the number of log
-// entries queued (rules with `each` may produce multiple).
+// processItem applies the first matching rule to the body. Returns the
+// number of log entries queued (rules with `each` may produce multiple);
+// returns 0 when no rule matches or rules render empty.
 func (a *API) processItem(rs *rules.RuleSet, body []byte) int {
-	if rs != nil && len(rs.Rules) > 0 {
-		target := rules.ExtractTarget(body)
-		if rule := rs.Find(target); rule != nil {
-			results := rule.Apply(body)
-			for _, res := range results {
-				a.writeEvent(res.Type, res.Title, res.Message)
-			}
-			return len(results)
-		}
-	}
-	var entry Event
-	if err := json.Unmarshal(body, &entry); err != nil {
+	if rs == nil || len(rs.Rules) == 0 {
 		return 0
 	}
-	if entry.Type == "" && entry.Title == "" && entry.Message == "" {
+	rule := rs.Find(rules.ExtractTarget(body))
+	if rule == nil {
 		return 0
 	}
-	msgs := []string(nil)
-	if entry.Message != "" {
-		msgs = []string{entry.Message}
+	results := rule.Apply(body)
+	for _, res := range results {
+		a.writeEvent(res.Type, res.Title, res.Message)
 	}
-	a.writeEvent(entry.Type, entry.Title, msgs)
-	return 1
+	return len(results)
 }
 
 func isJSONArray(body []byte) bool {
@@ -211,11 +192,11 @@ func respondOK(w http.ResponseWriter, status string) {
 }
 
 // @Summary Log an event
-// @Description Log an event
+// @Description Accepts arbitrary JSON (object or array); rules.yaml extracts log entries.
 // @ID log-event
 // @Accept  json
 // @Produce  json
-// @Param   entry     body    Event     true        "Log Entry"
+// @Param   body     body    object     true        "Arbitrary JSON payload"
 // @Success 200 {object} map[string]string
 // @Router /events [post]
 func (a *API) Run() {

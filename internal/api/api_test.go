@@ -15,14 +15,38 @@ import (
 	"time"
 )
 
+// eventBody is a shared helper for tests that need a {type,title,message}
+// payload. It pairs with writePassthroughRules.
+type eventBody struct {
+	Type    string `json:"type"`
+	Title   string `json:"title"`
+	Message string `json:"message"`
+}
+
+// writePassthroughRules installs a rules.yaml that maps the simple
+// {type,title,message} JSON shape straight into a log entry.
+func writePassthroughRules(t *testing.T, dir string) {
+	t.Helper()
+	writeRules(t, dir, `
+rules:
+  - name: passthrough
+    match: {}
+    extract:
+      type: "{type}"
+      title: "{title}"
+      message: "{message}"
+`)
+}
+
 func TestLogEventHandler(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, err := NewAPI(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	body, _ := json.Marshal(Event{Type: "test-type", Title: "test-title", Message: "test message"})
+	body, _ := json.Marshal(eventBody{Type: "test-type", Title: "test-title", Message: "test message"})
 	rr := httptest.NewRecorder()
 	a.logEventHandler(rr, httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 	a.Close()
@@ -56,12 +80,13 @@ func TestLogEventHandler(t *testing.T) {
 
 func TestLogEventHandlerWritesDaemonLog(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, err := NewAPI(dir)
 	if err != nil {
 		t.Fatal("Failed to create API:", err)
 	}
 
-	body, _ := json.Marshal(Event{Type: "t", Title: "ti", Message: "m"})
+	body, _ := json.Marshal(eventBody{Type: "t", Title: "ti", Message: "m"})
 	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
 	a.logEventHandler(httptest.NewRecorder(), req)
 
@@ -78,6 +103,7 @@ func TestLogEventHandlerWritesDaemonLog(t *testing.T) {
 
 func TestLogEventHandlerPreservesOrder(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, err := NewAPI(dir)
 	if err != nil {
 		t.Fatal("Failed to create API:", err)
@@ -85,7 +111,7 @@ func TestLogEventHandlerPreservesOrder(t *testing.T) {
 
 	const n = 50
 	for i := 0; i < n; i++ {
-		body, _ := json.Marshal(Event{Type: "t", Title: fmt.Sprintf("title-%d", i), Message: "m"})
+		body, _ := json.Marshal(eventBody{Type: "t", Title: fmt.Sprintf("title-%d", i), Message: "m"})
 		req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
 		a.logEventHandler(httptest.NewRecorder(), req)
 	}
@@ -189,14 +215,16 @@ rules:
 	}
 }
 
-func TestLegacyEventFallbackWhenNoRuleMatches(t *testing.T) {
+func TestNoRuleMatchDropsBody(t *testing.T) {
+	// With no rules.yaml configured, every body should be dropped — no
+	// fallback to a legacy shape.
 	dir := t.TempDir()
 	a, err := NewAPI(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	body, _ := json.Marshal(Event{Type: "legacy", Title: "t", Message: "m"})
+	body, _ := json.Marshal(eventBody{Type: "x", Title: "t", Message: "m"})
 	req := httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body))
 	rr := httptest.NewRecorder()
 	a.logEventHandler(rr, req)
@@ -205,25 +233,29 @@ func TestLegacyEventFallbackWhenNoRuleMatches(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d", rr.Code)
 	}
+	if strings.TrimSpace(rr.Body.String()) != `{"status":"no_match"}` {
+		t.Errorf("body = %q, want no_match", rr.Body.String())
+	}
 	got, _ := os.ReadFile(filepath.Join(dir, "events.log"))
-	if !strings.Contains(string(got), "legacy") {
-		t.Errorf("legacy event not written:\n%s", string(got))
+	if len(got) != 0 {
+		t.Errorf("events.log should be empty, got: %s", got)
 	}
 }
 
 func TestLogsJSONPaginationAndFilter(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, err := NewAPI(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
-		body, _ := json.Marshal(Event{Type: "alpha", Title: fmt.Sprintf("a%d", i), Message: "m"})
+		body, _ := json.Marshal(eventBody{Type: "alpha", Title: fmt.Sprintf("a%d", i), Message: "m"})
 		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 		time.Sleep(time.Millisecond) // ensure timestamp ordering
 	}
 	for i := 0; i < 3; i++ {
-		body, _ := json.Marshal(Event{Type: "beta", Title: fmt.Sprintf("b%d", i), Message: "m"})
+		body, _ := json.Marshal(eventBody{Type: "beta", Title: fmt.Sprintf("b%d", i), Message: "m"})
 		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 		time.Sleep(time.Millisecond)
 	}
@@ -525,10 +557,11 @@ rules:
 
 func TestTitleSearchFilter(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, _ := NewAPI(dir)
 	titles := []string{"Login OK", "Login failed", "Order placed", "Cart cleared"}
 	for _, title := range titles {
-		body, _ := json.Marshal(Event{Type: "t", Title: title, Message: "x"})
+		body, _ := json.Marshal(eventBody{Type: "t", Title: title, Message: "x"})
 		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 		time.Sleep(time.Microsecond)
 	}
@@ -552,9 +585,10 @@ func TestTitleSearchFilter(t *testing.T) {
 
 func TestDeleteSingleByID(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, _ := NewAPI(dir)
 	for _, title := range []string{"a", "b", "c"} {
-		body, _ := json.Marshal(Event{Type: "t", Title: title, Message: "m"})
+		body, _ := json.Marshal(eventBody{Type: "t", Title: title, Message: "m"})
 		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 		time.Sleep(time.Microsecond)
 	}
@@ -598,9 +632,10 @@ func TestDeleteSingleByID(t *testing.T) {
 
 func TestDeleteAllAndKeepWriting(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, _ := NewAPI(dir)
 	for _, title := range []string{"a", "b", "c"} {
-		body, _ := json.Marshal(Event{Type: "t", Title: title, Message: "m"})
+		body, _ := json.Marshal(eventBody{Type: "t", Title: title, Message: "m"})
 		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 	}
 	// Don't close — make sure delete works on a live writer and writes
@@ -615,7 +650,7 @@ func TestDeleteAllAndKeepWriting(t *testing.T) {
 	}
 
 	// New writes should continue to work.
-	body, _ := json.Marshal(Event{Type: "t", Title: "after", Message: "m"})
+	body, _ := json.Marshal(eventBody{Type: "t", Title: "after", Message: "m"})
 	a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 	a.Close()
 
@@ -627,6 +662,7 @@ func TestDeleteAllAndKeepWriting(t *testing.T) {
 
 func TestDeleteWithTypeAndQueryFilter(t *testing.T) {
 	dir := t.TempDir()
+	writePassthroughRules(t, dir)
 	a, _ := NewAPI(dir)
 	type evt struct{ typ, title string }
 	for _, e := range []evt{
@@ -635,7 +671,7 @@ func TestDeleteWithTypeAndQueryFilter(t *testing.T) {
 		{"alpha", "Order placed"},
 		{"beta", "Login error"},
 	} {
-		body, _ := json.Marshal(Event{Type: e.typ, Title: e.title, Message: "m"})
+		body, _ := json.Marshal(eventBody{Type: e.typ, Title: e.title, Message: "m"})
 		a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events", bytes.NewBuffer(body)))
 		time.Sleep(time.Microsecond)
 	}
