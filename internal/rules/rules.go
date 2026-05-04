@@ -1,8 +1,8 @@
 // Package rules loads ingestion rules from YAML and applies them to incoming
-// JSON payloads. A rule matches a request by host/path/method (plus an
-// optional response status) and extracts fields using gjson paths embedded
-// in template strings. An optional `each` gjson path fans the rule out
-// across nested array elements, so a body containing a list can produce
+// JSON payloads. A rule matches a request by host/path/method/query (plus
+// an optional response status) and extracts fields using gjson paths
+// embedded in template strings. An optional `each` gjson path fans the rule
+// out across nested array elements, so a body containing a list can produce
 // one log entry per matching item.
 //
 // Rule example:
@@ -12,6 +12,9 @@
 //	    match:
 //	      host: api.example.com
 //	      path: /api/cart
+//	      query:
+//	        ref: homepage    # require ?ref=homepage
+//	        debug: ""        # require ?debug present, any value
 //	    each: 'items.#(name%"*alert*")#'   # one event per matching item
 //	    extract:
 //	      type: "cart_alert"
@@ -37,10 +40,11 @@ import (
 )
 
 type Match struct {
-	Host   string `yaml:"host"`
-	Path   string `yaml:"path"`
-	Method string `yaml:"method"`
-	Status string `yaml:"status"`
+	Host   string            `yaml:"host"`
+	Path   string            `yaml:"path"`
+	Method string            `yaml:"method"`
+	Status string            `yaml:"status"`
+	Query  map[string]string `yaml:"query"`
 }
 
 // Matches is the YAML form of a rule's match condition. It accepts either a
@@ -189,12 +193,13 @@ type RuleSet struct {
 
 // Target is the set of values extracted from an incoming payload that a
 // rule's Match block is checked against. StatusCode is 0 for request-only
-// payloads.
+// payloads. Query is nil when the source URL had no query string.
 type Target struct {
 	Method     string
 	Host       string
 	Path       string
 	StatusCode int
+	Query      url.Values
 }
 
 // Result is one fully-rendered event produced by a rule.
@@ -258,7 +263,8 @@ func (r *Rule) matchesTarget(t Target) bool {
 		if matchMethod(m.Method, t.Method) &&
 			matchHost(m.Host, t.Host) &&
 			matchPath(m.Path, t.Path) &&
-			matchStatus(m.Status, t.StatusCode) {
+			matchStatus(m.Status, t.StatusCode) &&
+			matchQuery(m.Query, t.Query) {
 			return true
 		}
 	}
@@ -288,6 +294,36 @@ func matchPath(pattern, path string) bool {
 		return path == prefix || strings.HasPrefix(path, prefix+"/")
 	}
 	return pattern == path
+}
+
+// matchQuery checks every (key, value) pair in pattern against the request's
+// query parameters. All keys must be present; if a pattern value is non-empty
+// it must equal one of the values supplied for that key. An empty pattern
+// value means "key must be present, value any".
+func matchQuery(pattern map[string]string, query url.Values) bool {
+	if len(pattern) == 0 {
+		return true
+	}
+	for key, want := range pattern {
+		values, ok := query[key]
+		if !ok || len(values) == 0 {
+			return false
+		}
+		if want == "" {
+			continue
+		}
+		matched := false
+		for _, v := range values {
+			if v == want {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func matchStatus(pattern string, code int) bool {
@@ -326,12 +362,13 @@ func matchStatus(pattern string, code int) bool {
 // client might forward.
 //
 // Resolution order:
-//  1. top-level `url` (full URL or absolute path) — provides host+path
-//  2. top-level `host`/`path`
+//  1. top-level `url` (full URL or absolute path) — provides host+path+query
+//  2. top-level `host`/`path` (path may carry a query string)
 //  3. nested `request.host`/`request.path`, or `request.url`
 //
 // Method comes from top-level `method` or `request.method`. Status comes
-// from top-level `status`/`statusCode` or `response.statusCode`.
+// from top-level `status`/`statusCode` or `response.statusCode`. Query
+// parameters come from the first source above that supplied them.
 func ExtractTarget(body []byte) Target {
 	t := Target{
 		Method: firstNonEmpty(
@@ -346,8 +383,9 @@ func ExtractTarget(body []byte) Target {
 	}
 
 	host, path := "", ""
+	var query url.Values
 	if u := gjson.GetBytes(body, "url").String(); u != "" {
-		host, path = parseURL(u)
+		host, path, query = parseURL(u)
 	}
 	if host == "" {
 		host = firstNonEmpty(
@@ -356,34 +394,49 @@ func ExtractTarget(body []byte) Target {
 		)
 	}
 	if path == "" {
-		path = firstNonEmpty(
+		if raw := firstNonEmpty(
 			gjson.GetBytes(body, "path").String(),
 			gjson.GetBytes(body, "request.path").String(),
-		)
+		); raw != "" {
+			_, p, q := parseURL(raw)
+			path = p
+			if len(query) == 0 {
+				query = q
+			}
+		}
 		if path == "" {
 			if ru := gjson.GetBytes(body, "request.url").String(); ru != "" {
-				if h, p := parseURL(ru); p != "" {
+				if h, p, q := parseURL(ru); p != "" {
 					if host == "" {
 						host = h
 					}
 					path = p
+					if len(query) == 0 {
+						query = q
+					}
 				}
 			}
 		}
 	}
 	t.Host = host
 	t.Path = path
+	t.Query = query
 	return t
 }
 
 // parseURL accepts either a full URL ("https://host/path?q=1") or a bare
-// path ("/path?q=1") and returns host + path (query stripped).
-func parseURL(s string) (host, path string) {
+// path ("/path?q=1") and returns host, path, and parsed query parameters.
+// Query is nil if the input had no query string.
+func parseURL(s string) (host, path string, query url.Values) {
 	u, err := url.Parse(s)
 	if err != nil {
-		return "", s
+		return "", s, nil
 	}
-	return u.Host, u.Path
+	q := u.Query()
+	if len(q) == 0 {
+		q = nil
+	}
+	return u.Host, u.Path, q
 }
 
 func firstNonEmpty(values ...string) string {
