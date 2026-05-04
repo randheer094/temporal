@@ -392,6 +392,182 @@ rules:
 	}
 }
 
+func makeStarlarkList(t *testing.T, entries ...map[string]starlark.Value) *starlark.List {
+	t.Helper()
+	var elems []starlark.Value
+	for _, m := range entries {
+		d := new(starlark.Dict)
+		for k, v := range m {
+			d.SetKey(starlark.String(k), v)
+		}
+		elems = append(elems, d)
+	}
+	return starlark.NewList(elems)
+}
+
+func TestStarlarkToResults_BasicEntry(t *testing.T) {
+	list := makeStarlarkList(t, map[string]starlark.Value{
+		"type":  starlark.String("info"),
+		"title": starlark.String("hello"),
+	})
+	results := starlarkToResults("r", list, nil)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Type != "info" || results[0].Title != "hello" {
+		t.Errorf("got %+v", results[0])
+	}
+}
+
+func TestStarlarkToResults_MessageString(t *testing.T) {
+	list := makeStarlarkList(t, map[string]starlark.Value{
+		"type":    starlark.String("info"),
+		"title":   starlark.String("t"),
+		"message": starlark.String("single"),
+	})
+	results := starlarkToResults("r", list, nil)
+	if len(results[0].Message) != 1 || results[0].Message[0] != "single" {
+		t.Errorf("message = %v", results[0].Message)
+	}
+}
+
+func TestStarlarkToResults_MessageList(t *testing.T) {
+	msgs := starlark.NewList([]starlark.Value{starlark.String("a"), starlark.String("b")})
+	list := makeStarlarkList(t, map[string]starlark.Value{
+		"type":    starlark.String("info"),
+		"title":   starlark.String("t"),
+		"message": msgs,
+	})
+	results := starlarkToResults("r", list, nil)
+	if len(results[0].Message) != 2 || results[0].Message[0] != "a" || results[0].Message[1] != "b" {
+		t.Errorf("message = %v", results[0].Message)
+	}
+}
+
+func TestStarlarkToResults_MissingTypeSkipped(t *testing.T) {
+	var logged []string
+	list := makeStarlarkList(t, map[string]starlark.Value{
+		"title": starlark.String("t"),
+	})
+	results := starlarkToResults("r", list, func(msg string) { logged = append(logged, msg) })
+	if len(results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+	if len(logged) == 0 {
+		t.Error("expected an error to be logged")
+	}
+}
+
+func TestStarlarkToResults_MissingTitleSkipped(t *testing.T) {
+	var logged []string
+	list := makeStarlarkList(t, map[string]starlark.Value{
+		"type": starlark.String("info"),
+	})
+	results := starlarkToResults("r", list, func(msg string) { logged = append(logged, msg) })
+	if len(results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+	if len(logged) == 0 {
+		t.Error("expected an error to be logged")
+	}
+}
+
+func writeScript(t *testing.T, name, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestCompileScripts_ValidScript(t *testing.T) {
+	dir := writeScript(t, "s.star", `
+def process(body):
+    return [{"type": "info", "title": "ok"}]
+`)
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    script: s.star
+`))
+	var logged []string
+	rs.CompileScripts(dir, func(msg string) { logged = append(logged, msg) })
+	if len(logged) != 0 {
+		t.Errorf("unexpected log: %v", logged)
+	}
+	if rs.Rules[0].scriptGlobals == nil {
+		t.Error("scriptGlobals should be set after compile")
+	}
+}
+
+func TestCompileScripts_MissingFile(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    script: missing.star
+`))
+	var logged []string
+	rs.CompileScripts(t.TempDir(), func(msg string) { logged = append(logged, msg) })
+	if len(logged) == 0 {
+		t.Error("expected error logged for missing file")
+	}
+	if rs.Rules[0].scriptGlobals != nil {
+		t.Error("scriptGlobals should be nil after failed compile")
+	}
+}
+
+func TestCompileScripts_SyntaxError(t *testing.T) {
+	dir := writeScript(t, "bad.star", `this is not valid starlark @@@@`)
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    script: bad.star
+`))
+	var logged []string
+	rs.CompileScripts(dir, func(msg string) { logged = append(logged, msg) })
+	if len(logged) == 0 {
+		t.Error("expected error logged for syntax error")
+	}
+	if rs.Rules[0].scriptGlobals != nil {
+		t.Error("scriptGlobals should be nil after failed compile")
+	}
+}
+
+func TestCompileScripts_NoProcessFunction(t *testing.T) {
+	dir := writeScript(t, "noprocess.star", `x = 1`)
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    script: noprocess.star
+`))
+	var logged []string
+	rs.CompileScripts(dir, func(msg string) { logged = append(logged, msg) })
+	if len(logged) == 0 {
+		t.Error("expected error logged for missing process function")
+	}
+	if rs.Rules[0].scriptGlobals != nil {
+		t.Error("scriptGlobals should be nil when process not defined")
+	}
+}
+
+func TestCompileScripts_SkipsRulesWithoutScript(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    extract: { type: t, title: T }
+`))
+	rs.CompileScripts(t.TempDir(), nil)
+	if rs.Rules[0].scriptGlobals != nil {
+		t.Error("scriptGlobals should be nil for non-script rule")
+	}
+}
+
 func TestJsonToStarlark_Primitives(t *testing.T) {
 	v, err := jsonToStarlark([]byte(`{"s":"hello","n":42,"f":3.14,"b":true,"null":null}`))
 	if err != nil {
