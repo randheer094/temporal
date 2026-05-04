@@ -137,6 +137,12 @@ func (rs *RuleSet) CompileScripts(scriptsDir string, logf func(string)) {
 		if r.Script == "" {
 			continue
 		}
+		if filepath.Base(r.Script) != r.Script {
+			if logf != nil {
+				logf(fmt.Sprintf("script %s: invalid filename (must be a bare filename, not a path)", r.Script))
+			}
+			continue
+		}
 		globals, err := compileScript(filepath.Join(scriptsDir, r.Script))
 		if err != nil {
 			if logf != nil {
@@ -155,7 +161,12 @@ func (rs *RuleSet) CompileScripts(scriptsDir string, logf func(string)) {
 }
 
 func compileScript(path string) (starlark.StringDict, error) {
-	thread := &starlark.Thread{Name: path}
+	thread := &starlark.Thread{
+		Name: path,
+		Load: func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
+			return nil, fmt.Errorf("load() is not supported in temporal scripts (attempted to load %q)", module)
+		},
+	}
 	return starlark.ExecFile(thread, path, nil, nil)
 }
 
@@ -167,7 +178,13 @@ func (r *Rule) applyScript(jsonBody []byte, logf func(string)) []Result {
 		}
 		return nil
 	}
-	thread := &starlark.Thread{Name: r.Name}
+	thread := &starlark.Thread{
+		Name: r.Name,
+		Load: func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
+			return nil, fmt.Errorf("load() is not supported in temporal scripts (attempted to load %q)", module)
+		},
+	}
+	thread.SetMaxExecutionSteps(1_000_000)
 	fn := r.scriptGlobals["process"]
 	result, err := starlark.Call(thread, fn, starlark.Tuple{bodyVal}, nil)
 	if err != nil {

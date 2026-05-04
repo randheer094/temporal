@@ -555,6 +555,50 @@ rules:
 	}
 }
 
+func TestApply_ScriptCompileFailDoesNotFallThroughToExtract(t *testing.T) {
+	rs, err := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    script: missing.star
+    extract:
+      - type: t
+        title: T
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	rs.CompileScripts(t.TempDir(), func(msg string) { logged = append(logged, msg) })
+	if rs.Rules[0].scriptGlobals != nil {
+		t.Fatal("scriptGlobals should be nil after failed compile")
+	}
+	results := rs.Rules[0].Apply([]byte(`{"path":"/x"}`), nil)
+	if len(results) != 0 {
+		t.Errorf("expected 0 results when script failed to compile, got %d", len(results))
+	}
+}
+
+func TestCompileScripts_PathTraversalRejected(t *testing.T) {
+	rs, err := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    script: ../evil.star
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	rs.CompileScripts(t.TempDir(), func(msg string) { logged = append(logged, msg) })
+	if rs.Rules[0].scriptGlobals != nil {
+		t.Error("scriptGlobals should be nil for path-traversal script name")
+	}
+	if len(logged) == 0 {
+		t.Error("expected a log message for invalid script filename")
+	}
+}
+
 func TestCompileScripts_SkipsRulesWithoutScript(t *testing.T) {
 	rs, _ := Load(writeRules(t, `
 rules:
