@@ -568,6 +568,127 @@ rules:
 	}
 }
 
+func loadScriptRule(t *testing.T, scriptBody string) *Rule {
+	t.Helper()
+	dir := writeScript(t, "s.star", scriptBody)
+	rs, err := Load(writeRules(t, `
+rules:
+  - name: scripted
+    match: { path: /x }
+    script: s.star
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs.CompileScripts(dir, func(msg string) { t.Log("compile:", msg) })
+	return &rs.Rules[0]
+}
+
+func TestApplyScript_ReturnsEntries(t *testing.T) {
+	r := loadScriptRule(t, `
+def process(body):
+    return [
+        {"type": "info", "title": body["host"], "message": [body["path"]]},
+    ]
+`)
+	results := r.Apply([]byte(`{"host":"api.example.com","path":"/x"}`), nil)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Type != "info" || results[0].Title != "api.example.com" {
+		t.Errorf("got %+v", results[0])
+	}
+	if len(results[0].Message) != 1 || results[0].Message[0] != "/x" {
+		t.Errorf("message = %v", results[0].Message)
+	}
+}
+
+func TestApplyScript_EmptyList(t *testing.T) {
+	r := loadScriptRule(t, `
+def process(body):
+    return []
+`)
+	results := r.Apply([]byte(`{"host":"x","path":"/x"}`), nil)
+	if len(results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+}
+
+func TestApplyScript_RuntimeErrorLogged(t *testing.T) {
+	r := loadScriptRule(t, `
+def process(body):
+    fail("boom")
+`)
+	var logged []string
+	results := r.Apply([]byte(`{}`), func(msg string) { logged = append(logged, msg) })
+	if len(results) != 0 {
+		t.Errorf("expected 0 results on error, got %d", len(results))
+	}
+	if len(logged) == 0 {
+		t.Error("expected runtime error to be logged")
+	}
+}
+
+func TestApplyScript_BadReturnTypeLogged(t *testing.T) {
+	r := loadScriptRule(t, `
+def process(body):
+    return "not a list"
+`)
+	var logged []string
+	results := r.Apply([]byte(`{}`), func(msg string) { logged = append(logged, msg) })
+	if len(results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+	if len(logged) == 0 {
+		t.Error("expected bad return type to be logged")
+	}
+}
+
+func TestApplyScript_IgnoresEachAndExtract(t *testing.T) {
+	dir := writeScript(t, "s.star", `
+def process(body):
+    return [{"type": "script", "title": "from-script"}]
+`)
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    script: s.star
+    each: items
+    extract:
+      type: extract
+      title: from-extract
+`))
+	rs.CompileScripts(dir, nil)
+	results := rs.Rules[0].Apply([]byte(`{"path":"/x","items":[{"name":"a"}]}`), nil)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result (script only), got %d", len(results))
+	}
+	if results[0].Type != "script" {
+		t.Errorf("expected script result, got type=%q", results[0].Type)
+	}
+}
+
+func TestApplyScript_MessageStringAndList(t *testing.T) {
+	r := loadScriptRule(t, `
+def process(body):
+    return [
+        {"type": "a", "title": "t1", "message": "single"},
+        {"type": "b", "title": "t2", "message": ["x", "y"]},
+    ]
+`)
+	results := r.Apply([]byte(`{}`), nil)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if len(results[0].Message) != 1 || results[0].Message[0] != "single" {
+		t.Errorf("string message = %v", results[0].Message)
+	}
+	if len(results[1].Message) != 2 || results[1].Message[0] != "x" || results[1].Message[1] != "y" {
+		t.Errorf("list message = %v", results[1].Message)
+	}
+}
+
 func TestJsonToStarlark_Primitives(t *testing.T) {
 	v, err := jsonToStarlark([]byte(`{"s":"hello","n":42,"f":3.14,"b":true,"null":null}`))
 	if err != nil {

@@ -418,6 +418,9 @@ var placeholder = regexp.MustCompile(`\{([^{}]+)\}`)
 // Results (all fields rendered empty) are filtered out so the caller
 // doesn't write blank log entries.
 func (r *Rule) Apply(jsonBody []byte, logf func(string)) []Result {
+	if r.scriptGlobals != nil {
+		return r.applyScript(jsonBody, logf)
+	}
 	bodies := r.contextBodies(jsonBody)
 	if len(r.Extracts) == 0 || len(bodies) == 0 {
 		return nil

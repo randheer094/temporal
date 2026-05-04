@@ -101,6 +101,7 @@ func (a *API) ReloadRules() error {
 		a.rulesMu.Unlock()
 		return err
 	}
+	rs.CompileScripts(filepath.Join(a.logDir, "scripts"), a.logDaemon)
 	a.rulesMu.Lock()
 	a.rules = rs
 	a.rulesMu.Unlock()
