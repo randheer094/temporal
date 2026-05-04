@@ -49,6 +49,11 @@ func refreshRules() {
 		os.Exit(1)
 	}
 
+	scriptsDir := filepath.Join(logDir, "scripts")
+	rs.CompileScripts(scriptsDir, func(msg string) {
+		fmt.Fprintln(os.Stderr, "script warning:", msg)
+	})
+
 	fmt.Printf("rules.yaml OK — %d rule(s) loaded:\n", len(rs.Rules))
 	for _, r := range rs.Rules {
 		fmt.Printf("  - %s\n", r.Name)

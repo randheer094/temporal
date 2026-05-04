@@ -101,6 +101,7 @@ func (a *API) ReloadRules() error {
 		a.rulesMu.Unlock()
 		return err
 	}
+	rs.CompileScripts(filepath.Join(a.logDir, "scripts"), a.logDaemon)
 	a.rulesMu.Lock()
 	a.rules = rs
 	a.rulesMu.Unlock()
@@ -170,7 +171,7 @@ func (a *API) processItem(rs *rules.RuleSet, body []byte) int {
 	if rule == nil {
 		return 0
 	}
-	results := rule.Apply(body)
+	results := rule.Apply(body, a.logDaemon)
 	for _, res := range results {
 		a.writeEvent(res.Type, res.Title, res.Message)
 	}

@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/tidwall/gjson"
+	"go.starlark.net/starlark"
 	"gopkg.in/yaml.v3"
 )
 
@@ -174,10 +175,12 @@ func (e *Extracts) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Rule struct {
-	Name     string   `yaml:"name"`
-	Matches  Matches  `yaml:"match"`
-	Eaches   Eaches   `yaml:"each"`
-	Extracts Extracts `yaml:"extract"`
+	Name          string   `yaml:"name"`
+	Matches       Matches  `yaml:"match"`
+	Eaches        Eaches   `yaml:"each"`
+	Extracts      Extracts `yaml:"extract"`
+	Script        string   `yaml:"script"`
+	scriptGlobals starlark.StringDict
 }
 
 type RuleSet struct {
@@ -414,7 +417,13 @@ var placeholder = regexp.MustCompile(`\{([^{}]+)\}`)
 // For every (context body × extract) pair, one Result is rendered. Empty
 // Results (all fields rendered empty) are filtered out so the caller
 // doesn't write blank log entries.
-func (r *Rule) Apply(jsonBody []byte) []Result {
+func (r *Rule) Apply(jsonBody []byte, logf func(string)) []Result {
+	if r.Script != "" {
+		if r.scriptGlobals == nil {
+			return nil
+		}
+		return r.applyScript(jsonBody, logf)
+	}
 	bodies := r.contextBodies(jsonBody)
 	if len(r.Extracts) == 0 || len(bodies) == 0 {
 		return nil

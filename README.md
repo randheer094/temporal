@@ -55,6 +55,7 @@ A daemon that exposes a REST endpoint for logging events. It manages its own pro
 - `~/.temporal/daemon.log` — server activity (e.g. requests received, startup messages).
 - `~/.temporal/daemon.pid` — PID of the running daemon.
 - `~/.temporal/rules.yaml` — optional. Extraction rules applied to incoming JSON (see [Rule-based ingestion](#rule-based-ingestion)).
+- `~/.temporal/scripts/` — optional directory for Starlark extraction scripts referenced by `script:` fields in `rules.yaml`.
 
 ### Subcommands
 
@@ -106,6 +107,41 @@ rules:
         - "status={response.statusCode}"
         - "ip={request.headers.X-Forwarded-For}"
 ```
+
+#### Script-based extraction
+
+Instead of `each:` and `extract:`, a rule can delegate extraction to a [Starlark](https://github.com/google/starlark-go) script:
+
+```yaml
+rules:
+  - name: my-rule
+    match:
+      host: api.example.com
+      method: POST
+    script: script1.star
+```
+
+`script:` is a filename resolved relative to `~/.temporal/scripts/`. When `script:` is present, `each:` and `extract:` are ignored — the script owns the full extraction pipeline.
+
+The script must define a top-level function named `process` that accepts one argument (the event body as a Starlark dict) and returns a list of dicts:
+
+```python
+# ~/.temporal/scripts/script1.star
+
+def process(body):
+    entries = []
+    for item in body.get("items", []):
+        entries.append({
+            "type": "info",
+            "title": item["name"],
+            "message": [item["status"]],
+        })
+    return entries
+```
+
+Each returned dict must have `type` and `title` (strings). `message` is optional — either a string or a list of strings. Entries missing required fields are skipped and logged to `daemon.log`.
+
+Script errors (missing file, syntax error, runtime exception, bad return type) are all logged to `daemon.log`; the `/events` endpoint always returns `200`. Scripts are reloaded with `temporal server rules` — the same SIGHUP mechanism used for YAML rules.
 
 A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings; empty messages are dropped from the array.
 
