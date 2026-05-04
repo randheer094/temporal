@@ -1,19 +1,33 @@
-# Example Starlark extraction script — copy to ~/.temporal/scripts/order-alerts.star
+# Example Python extraction script — copy to ~/.temporal/scripts/order-alerts.py
 #
 # This script is referenced by the `script_order_alerts` rule in examples/rules.yaml.
-# It receives the full event body as a Starlark dict and returns a list of log entries.
+# It receives the full event body as a Python dict and returns a list of log entries.
 #
 # Use scripts when your extraction logic goes beyond what gjson templates can express:
-# conditionals, string formatting, filtering across multiple fields, etc.
+# conditionals, string formatting, JSON parsing of string-valued bodies, filtering
+# across multiple fields, etc.
 #
+# Requires python3 (or python) on the daemon's PATH.
 # Reload after editing: temporal server rules
+
+import json
+
 
 def process(body):
     entries = []
 
     request = body.get("request", {})
     response = body.get("response", {})
-    items = request.get("body", {}).get("items", [])
+
+    # Proxyman forwards request/response bodies as raw strings; parse if needed.
+    req_body = request.get("body", {})
+    if isinstance(req_body, str):
+        try:
+            req_body = json.loads(req_body)
+        except (TypeError, ValueError):
+            req_body = {}
+
+    items = req_body.get("items", [])
     status = response.get("statusCode", 0)
 
     for item in items:
@@ -27,10 +41,10 @@ def process(body):
                 "type": "high_value_item",
                 "title": sku,
                 "message": [
-                    "qty: " + str(qty),
-                    "unit price: " + str(price),
-                    "line total: " + str(qty * price),
-                    "status: " + str(status),
+                    f"qty: {qty}",
+                    f"unit price: {price}",
+                    f"line total: {qty * price}",
+                    f"status: {status}",
                 ],
             })
 
@@ -39,7 +53,7 @@ def process(body):
             entries.append({
                 "type": "low_stock_warning",
                 "title": sku,
-                "message": "only " + str(qty) + " ordered — may indicate low stock",
+                "message": f"only {qty} ordered — may indicate low stock",
             })
 
     return entries

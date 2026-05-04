@@ -1,136 +1,67 @@
 package rules
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
-
-	"go.starlark.net/starlark"
+	"strings"
+	"sync"
+	"time"
 )
 
-func jsonToStarlark(data []byte) (starlark.Value, error) {
-	var v interface{}
-	if err := json.Unmarshal(data, &v); err != nil {
-		return nil, err
-	}
-	return interfaceToStarlark(v)
+// Python interpreter discovery: tried once per process. Both python3 and
+// python are accepted so the daemon runs on systems that ship one or the
+// other (modern Linux/macOS use python3; some BSDs only have python).
+var (
+	pythonOnce sync.Once
+	pythonBin  string
+	pythonErr  error
+)
+
+// scriptTimeout caps wall-clock time for any single process(body) invocation.
+// Long-running scripts are killed and logged; the /events handler still
+// returns 200 so a buggy script can't take down ingestion.
+const scriptTimeout = 5 * time.Second
+
+// pythonRunner is a tiny stdin/stdout shim that loads the user's script as
+// a Python module, calls process(body) with the JSON body parsed from stdin,
+// and writes the returned list of dicts as JSON to stdout. Keeping this
+// inline (rather than shipping a separate runner.py file) means scripts work
+// with any temporal binary, no install-time file layout to get wrong.
+const pythonRunner = `
+import json, sys, runpy
+ns = runpy.run_path(sys.argv[1])
+process = ns.get("process")
+if not callable(process):
+    sys.stderr.write("no callable 'process(body)' defined\n")
+    sys.exit(2)
+body = json.load(sys.stdin)
+entries = process(body)
+json.dump(entries, sys.stdout)
+`
+
+func detectPython() (string, error) {
+	pythonOnce.Do(func() {
+		for _, name := range []string{"python3", "python"} {
+			if p, err := exec.LookPath(name); err == nil {
+				pythonBin = p
+				return
+			}
+		}
+		pythonErr = errors.New("no python3 or python found on PATH")
+	})
+	return pythonBin, pythonErr
 }
 
-func interfaceToStarlark(v interface{}) (starlark.Value, error) {
-	if v == nil {
-		return starlark.None, nil
-	}
-	switch val := v.(type) {
-	case bool:
-		return starlark.Bool(val), nil
-	case float64:
-		if val == float64(int64(val)) {
-			return starlark.MakeInt64(int64(val)), nil
-		}
-		return starlark.Float(val), nil
-	case string:
-		return starlark.String(val), nil
-	case []interface{}:
-		elems := make([]starlark.Value, len(val))
-		for i, item := range val {
-			sv, err := interfaceToStarlark(item)
-			if err != nil {
-				return nil, err
-			}
-			elems[i] = sv
-		}
-		return starlark.NewList(elems), nil
-	case map[string]interface{}:
-		d := new(starlark.Dict)
-		for k, item := range val {
-			sv, err := interfaceToStarlark(item)
-			if err != nil {
-				return nil, err
-			}
-			if err := d.SetKey(starlark.String(k), sv); err != nil {
-				return nil, fmt.Errorf("set key %q: %w", k, err)
-			}
-		}
-		return d, nil
-	default:
-		return starlark.None, nil
-	}
-}
-
-func starlarkToResults(ruleName string, list *starlark.List, logf func(string)) []Result {
-	var out []Result
-	for i := 0; i < list.Len(); i++ {
-		item := list.Index(i)
-		d, ok := item.(*starlark.Dict)
-		if !ok {
-			if logf != nil {
-				logf(fmt.Sprintf("rule %s: script entry %d is not a dict, skipping", ruleName, i))
-			}
-			continue
-		}
-		typVal, ok := starlarkDictString(d, "type")
-		if !ok {
-			if logf != nil {
-				logf(fmt.Sprintf("rule %s: script entry %d missing or invalid 'type', skipping", ruleName, i))
-			}
-			continue
-		}
-		titleVal, ok := starlarkDictString(d, "title")
-		if !ok {
-			if logf != nil {
-				logf(fmt.Sprintf("rule %s: script entry %d missing or invalid 'title', skipping", ruleName, i))
-			}
-			continue
-		}
-		out = append(out, Result{
-			RuleName: ruleName,
-			Type:     typVal,
-			Title:    titleVal,
-			Message:  starlarkDictMessages(d),
-		})
-	}
-	return out
-}
-
-func starlarkDictString(d *starlark.Dict, key string) (string, bool) {
-	v, found, err := d.Get(starlark.String(key))
-	if err != nil || !found {
-		return "", false
-	}
-	s, ok := v.(starlark.String)
-	if !ok {
-		return "", false
-	}
-	return string(s), true
-}
-
-func starlarkDictMessages(d *starlark.Dict) []string {
-	v, found, _ := d.Get(starlark.String("message"))
-	if !found {
-		return nil
-	}
-	switch val := v.(type) {
-	case starlark.String:
-		s := string(val)
-		if s == "" {
-			return nil
-		}
-		return []string{s}
-	case *starlark.List:
-		var out []string
-		for i := 0; i < val.Len(); i++ {
-			if s, ok := val.Index(i).(starlark.String); ok {
-				if str := string(s); str != "" {
-					out = append(out, str)
-				}
-			}
-		}
-		return out
-	default:
-		return nil
-	}
-}
-
+// CompileScripts resolves each rule's script filename against scriptsDir and
+// validates Python syntax with a one-shot `ast.parse` so syntax errors show
+// up at load time instead of on the first matching event. Rules whose
+// script fails validation have scriptPath left blank, which Apply treats as
+// "skip" — the failure is logged via logf for the daemon's main log.
 func (rs *RuleSet) CompileScripts(scriptsDir string, logf func(string)) {
 	for i := range rs.Rules {
 		r := &rs.Rules[i]
@@ -143,62 +74,125 @@ func (rs *RuleSet) CompileScripts(scriptsDir string, logf func(string)) {
 			}
 			continue
 		}
-		globals, err := compileScript(filepath.Join(scriptsDir, r.Script))
-		if err != nil {
+		fullPath := filepath.Join(scriptsDir, r.Script)
+		if err := validatePythonSyntax(fullPath); err != nil {
 			if logf != nil {
-				logf(fmt.Sprintf("script %s: compile error: %v", r.Script, err))
+				logf(fmt.Sprintf("script %s: %v", r.Script, err))
 			}
 			continue
 		}
-		if _, ok := globals["process"]; !ok {
-			if logf != nil {
-				logf(fmt.Sprintf("script %s: no 'process' function defined", r.Script))
-			}
-			continue
-		}
-		r.scriptGlobals = globals
+		r.scriptPath = fullPath
 	}
 }
 
-func compileScript(path string) (starlark.StringDict, error) {
-	thread := &starlark.Thread{
-		Name: path,
-		Load: func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
-			return nil, fmt.Errorf("load() is not supported in temporal scripts (attempted to load %q)", module)
-		},
+func validatePythonSyntax(path string) error {
+	py, err := detectPython()
+	if err != nil {
+		return err
 	}
-	return starlark.ExecFile(thread, path, nil, nil)
+	cmd := exec.Command(py, "-c",
+		"import ast,sys; ast.parse(open(sys.argv[1]).read(), filename=sys.argv[1])",
+		path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := stderr.String()
+		if msg == "" {
+			return fmt.Errorf("syntax check failed: %w", err)
+		}
+		return fmt.Errorf("syntax check failed: %s", strings.TrimSpace(msg))
+	}
+	return nil
 }
 
 func (r *Rule) applyScript(jsonBody []byte, logf func(string)) []Result {
-	bodyVal, err := jsonToStarlark(jsonBody)
+	py, err := detectPython()
 	if err != nil {
 		if logf != nil {
-			logf(fmt.Sprintf("rule %s: parse body: %v", r.Name, err))
+			logf(fmt.Sprintf("rule %s: %v", r.Name, err))
 		}
 		return nil
 	}
-	thread := &starlark.Thread{
-		Name: r.Name,
-		Load: func(_ *starlark.Thread, module string) (starlark.StringDict, error) {
-			return nil, fmt.Errorf("load() is not supported in temporal scripts (attempted to load %q)", module)
-		},
-	}
-	thread.SetMaxExecutionSteps(1_000_000)
-	fn := r.scriptGlobals["process"]
-	result, err := starlark.Call(thread, fn, starlark.Tuple{bodyVal}, nil)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, py, "-c", pythonRunner, r.scriptPath)
+	cmd.Stdin = bytes.NewReader(jsonBody)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
 		if logf != nil {
-			logf(fmt.Sprintf("rule %s: script runtime error: %v", r.Name, err))
+			detail := strings.TrimSpace(stderr.String())
+			if ctx.Err() == context.DeadlineExceeded {
+				logf(fmt.Sprintf("rule %s: script timed out after %s", r.Name, scriptTimeout))
+			} else if detail != "" {
+				logf(fmt.Sprintf("rule %s: script error: %v: %s", r.Name, err, detail))
+			} else {
+				logf(fmt.Sprintf("rule %s: script error: %v", r.Name, err))
+			}
 		}
 		return nil
 	}
-	list, ok := result.(*starlark.List)
-	if !ok {
+
+	out := bytes.TrimSpace(stdout.Bytes())
+	if len(out) == 0 {
+		return nil
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(out, &entries); err != nil {
 		if logf != nil {
-			logf(fmt.Sprintf("rule %s: process() must return a list, got %s", r.Name, result.Type()))
+			logf(fmt.Sprintf("rule %s: process() must return a list of dicts (got: %s)", r.Name, err))
 		}
 		return nil
 	}
-	return starlarkToResults(r.Name, list, logf)
+	return entriesToResults(r.Name, entries, logf)
+}
+
+func entriesToResults(ruleName string, entries []map[string]any, logf func(string)) []Result {
+	var out []Result
+	for i, e := range entries {
+		typ, ok := e["type"].(string)
+		if !ok || typ == "" {
+			if logf != nil {
+				logf(fmt.Sprintf("rule %s: script entry %d missing or invalid 'type', skipping", ruleName, i))
+			}
+			continue
+		}
+		title, ok := e["title"].(string)
+		if !ok || title == "" {
+			if logf != nil {
+				logf(fmt.Sprintf("rule %s: script entry %d missing or invalid 'title', skipping", ruleName, i))
+			}
+			continue
+		}
+		out = append(out, Result{
+			RuleName: ruleName,
+			Type:     typ,
+			Title:    title,
+			Message:  entryMessages(e["message"]),
+		})
+	}
+	return out
+}
+
+func entryMessages(v any) []string {
+	switch m := v.(type) {
+	case string:
+		if m == "" {
+			return nil
+		}
+		return []string{m}
+	case []any:
+		var out []string
+		for _, item := range m {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }

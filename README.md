@@ -55,7 +55,7 @@ A daemon that exposes a REST endpoint for logging events. It manages its own pro
 - `~/.temporal/daemon.log` — server activity (e.g. requests received, startup messages).
 - `~/.temporal/daemon.pid` — PID of the running daemon.
 - `~/.temporal/rules.yaml` — optional. Extraction rules applied to incoming JSON (see [Rule-based ingestion](#rule-based-ingestion)).
-- `~/.temporal/scripts/` — optional directory for Starlark extraction scripts referenced by `script:` fields in `rules.yaml`.
+- `~/.temporal/scripts/` — optional directory for Python extraction scripts referenced by `script:` fields in `rules.yaml`. Requires `python3` (or `python`) on `PATH`.
 
 ### Subcommands
 
@@ -95,6 +95,7 @@ The endpoint **always returns `200 OK`**. The JSON response carries a `status` f
 ```yaml
 rules:
   - name: user_login
+    active: true              # optional; default true. Set false to disable a rule without deleting it.
     match:
       host: api.example.com   # optional; case-insensitive exact
       path: /api/login        # exact, or trailing /* for prefix
@@ -113,7 +114,7 @@ rules:
 
 #### Script-based extraction
 
-Instead of `each:` and `extract:`, a rule can delegate extraction to a [Starlark](https://github.com/google/starlark-go) script:
+Instead of `each:` and `extract:`, a rule can delegate extraction to a Python script:
 
 ```yaml
 rules:
@@ -121,19 +122,25 @@ rules:
     match:
       host: api.example.com
       method: POST
-    script: script1.star
+    script: script1.py
 ```
 
-`script:` is a filename resolved relative to `~/.temporal/scripts/`. When `script:` is present, `each:` and `extract:` are ignored — the script owns the full extraction pipeline.
+`script:` is a filename resolved relative to `~/.temporal/scripts/`. The daemon invokes `python3` (falling back to `python`) per matching event, so a Python interpreter must be on the daemon's `PATH`. When `script:` is present, `each:` and `extract:` are ignored — the script owns the full extraction pipeline.
 
-The script must define a top-level function named `process` that accepts one argument (the event body as a Starlark dict) and returns a list of dicts:
+The script must define a top-level function named `process` that accepts one argument (the event body as a Python dict) and returns a list of dicts:
 
 ```python
-# ~/.temporal/scripts/script1.star
+# ~/.temporal/scripts/script1.py
+import json
 
 def process(body):
+    # Proxyman forwards response bodies as raw strings; parse if needed.
+    raw = body.get("response", {}).get("body", {})
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+
     entries = []
-    for item in body.get("items", []):
+    for item in raw.get("items", []):
         entries.append({
             "type": "info",
             "title": item["name"],
@@ -144,7 +151,9 @@ def process(body):
 
 Each returned dict must have `type` and `title` (strings). `message` is optional — either a string or a list of strings. Entries missing required fields are skipped and logged to `daemon.log`.
 
-Script errors (missing file, syntax error, runtime exception, bad return type) are all logged to `daemon.log`; the `/events` endpoint always returns `200`. Scripts are reloaded with `temporal server rules` — the same SIGHUP mechanism used for YAML rules.
+Scripts run in an unsandboxed `python3` subprocess with the full standard library available (`json`, `re`, `datetime`, etc.). There's no network or filesystem isolation — only run scripts you trust. Each invocation is capped at 5 seconds wall-clock; longer runs are killed and logged.
+
+Script errors (missing file, syntax error, runtime exception, bad return type, timeout) are all logged to `daemon.log`; the `/events` endpoint always returns `200`. Scripts are reloaded with `temporal server rules` — the same SIGHUP mechanism used for YAML rules.
 
 A rule with `status` set only matches when the payload includes a response (e.g. a Proxyman `onResponse` forward). Templates use `{gjson.path}` placeholders against the **whole** request body — deep paths, array indexing, and queries are all supported (e.g. `items.0.name`, `users.#(age>18).name`). Missing paths render as empty strings; empty messages are dropped from the array.
 
@@ -153,6 +162,8 @@ A rule with `status` set only matches when the payload includes a response (e.g.
 #### Match operators
 
 Each field inside a `match` block is a separate test; **all** present fields must pass for that block to match. Omitted fields are wildcards.
+
+Top-level `active: false` on a rule removes it from matching entirely (the daemon skips it before checking any field). The default when `active` is omitted is `true`.
 
 | Field    | Type   | Semantic                                                                                          |
 | -------- | ------ | ------------------------------------------------------------------------------------------------- |

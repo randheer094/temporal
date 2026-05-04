@@ -131,13 +131,13 @@ rules:
       message: "qty {qty}"
 
   # ─────────────────────────────────────────────────────────────────────
-  # 8. Script-based extraction — use a Starlark script instead of
-  #    `each`/`extract` when you need conditionals, arithmetic, or any
-  #    logic beyond gjson template rendering.
+  # 8. Script-based extraction — use a Python script instead of
+  #    `each`/`extract` when you need conditionals, arithmetic, JSON
+  #    parsing, or any logic beyond gjson template rendering.
   #
   #    `script:` is a filename resolved relative to ~/.temporal/scripts/.
   #    The script must define process(body) → list of {type, title, message}.
-  #    See examples/order-alerts.star for the implementation.
+  #    Requires python3 (or python) on PATH. See examples/order-alerts.py.
   #
   #    When `script:` is set, `each` and `extract` are ignored even if
   #    present. Script errors are logged to daemon.log; the /events endpoint
@@ -147,7 +147,7 @@ rules:
     match:
       path: /api/order
       method: POST
-    script: order-alerts.star   # copy examples/order-alerts.star to ~/.temporal/scripts/
+    script: order-alerts.py   # copy examples/order-alerts.py to ~/.temporal/scripts/
 
   # ─────────────────────────────────────────────────────────────────────
   # 9. No `match` block at all — catch-all.
