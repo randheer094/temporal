@@ -86,7 +86,7 @@ Logged events are appended to `~/.temporal/events.log` as a single JSON line —
 
 ### Rule-based ingestion
 
-`POST /events` accepts arbitrary JSON shapes. The daemon resolves a target (host, path, method, response status) from the body and runs it against `~/.temporal/rules.yaml`. The first matching rule's `extract` templates render the log entry. Bodies that don't match any rule are dropped — there is no fallback shape. Bodies may also be a JSON **array**, in which case each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
+`POST /events` accepts arbitrary JSON shapes. The daemon resolves a target (host, path, method, query parameters, response status) from the body and runs it against `~/.temporal/rules.yaml`. The first matching rule's `extract` templates render the log entry. Bodies that don't match any rule are dropped — there is no fallback shape. Bodies may also be a JSON **array**, in which case each element is matched and written independently. Writes are queued by the file writer, so the handler returns immediately.
 
 The endpoint **always returns `200 OK`**. The JSON response carries a `status` field of `"ok"` (something was logged), `"no_match"` (nothing logged), or `"ignored"` (request not processable). Empty extractions are skipped — a rule whose templates all render to empty strings produces no log entry.
 
@@ -100,6 +100,9 @@ rules:
       path: /api/login        # exact, or trailing /* for prefix
       method: POST            # optional; case-insensitive
       status: "2xx"           # optional; "200", "2xx" / "4xx" / "5xx"
+      query:                  # optional; all listed params must match (extras are ignored)
+        ref: homepage         #   require ?ref=homepage
+        debug: ""             #   require ?debug present, any value
     extract:
       type: "user_action"
       title: "Login: {request.body.user.name}"
@@ -157,6 +160,7 @@ Each field inside a `match` block is a separate test; **all** present fields mus
 | `path`   | string | Exact match. Trailing `/*` makes it a prefix match (e.g. `/api/*` matches `/api/x` and `/api/x/y` but not `/apix`). Omit to allow any path. |
 | `method` | string | Case-insensitive exact comparison against the HTTP method. Omit to allow any method.              |
 | `status` | string | Either an exact 3-digit code (`"201"`) or an `Nxx` family (`"2xx"`/`"4xx"`/`"5xx"`). When set, the rule only matches payloads that carry a response status (request-only forwards are skipped). Omit to ignore status. |
+| `query`  | map    | Map of `param: value` pairs. Every listed param must be present in the request URL; an empty value (`""`) means "param must be present, value any". Only the params listed in the rule are checked — extra params in the request are ignored, so `?q1=v1&q2=v2` still matches a rule that only requires `q1: v1`. Omit to ignore query params. |
 
 #### Multiple match / each / extract
 
@@ -232,16 +236,17 @@ Empty rendered fields are dropped: an extract whose `type`, `title`, and every `
 
 #### Target resolution
 
-The daemon picks `host`, `path`, `method`, and `statusCode` from the body in this priority:
+The daemon picks `host`, `path`, `method`, `query`, and `statusCode` from the body in this priority:
 
 | Field      | Lookup order                                           |
 | ---------- | ------------------------------------------------------ |
 | host       | parsed from `url` → `host` → `request.host` → `request.url` |
 | path       | parsed from `url` → `path` → `request.path` → `request.url` |
 | method     | `method` → `request.method`                            |
+| query      | parsed from `url` → `path` → `request.path` → `request.url` (first source carrying a query string wins) |
 | statusCode | `status` → `statusCode` → `response.statusCode`        |
 
-`url` may be a full URL (`https://api.example.com/v1/x?ref=foo`) or a bare path. Query strings are stripped before matching.
+`url` may be a full URL (`https://api.example.com/v1/x?ref=foo`) or a bare path. Query strings are parsed into the target so `match.query` can constrain on them; the path itself is matched without the query.
 
 #### Proxyman integration
 

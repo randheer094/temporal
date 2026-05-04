@@ -357,6 +357,143 @@ rules:
 	}
 }
 
+func TestFindQueryExactMatch(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: ref_homepage
+    match:
+      path: /api/items
+      query:
+        ref: homepage
+    extract: { type: t, title: T, message: M }
+`))
+	body := []byte(`{"url":"https://x/api/items?ref=homepage&utm=foo"}`)
+	if r := rs.Find(ExtractTarget(body)); r == nil {
+		t.Fatal("expected match for ?ref=homepage")
+	}
+	wrongVal := []byte(`{"url":"https://x/api/items?ref=email"}`)
+	if r := rs.Find(ExtractTarget(wrongVal)); r != nil {
+		t.Fatal("?ref=email should not match ref: homepage")
+	}
+	missingKey := []byte(`{"url":"https://x/api/items?utm=foo"}`)
+	if r := rs.Find(ExtractTarget(missingKey)); r != nil {
+		t.Fatal("missing ref param should not match")
+	}
+	noQuery := []byte(`{"url":"https://x/api/items"}`)
+	if r := rs.Find(ExtractTarget(noQuery)); r != nil {
+		t.Fatal("missing query should not match")
+	}
+}
+
+func TestFindQueryEmptyValueRequiresPresence(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: any_debug
+    match:
+      path: /api/items
+      query:
+        debug: ""
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/api/items?debug=1"}`))); r == nil {
+		t.Fatal("debug=1 should match presence-only pattern")
+	}
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/api/items?debug=verbose"}`))); r == nil {
+		t.Fatal("debug=verbose should match presence-only pattern")
+	}
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/api/items?debug"}`))); r == nil {
+		t.Fatal("bare ?debug should match presence-only pattern")
+	}
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/api/items"}`))); r != nil {
+		t.Fatal("missing debug should not match presence-only pattern")
+	}
+}
+
+// Rule constrains only the params it lists; extra params in the request are
+// ignored. ?q1=v1 and ?q1=v1&q2=v2 must both match a rule that requires
+// only q1=v1.
+func TestFindQueryIgnoresExtraParams(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: only_q1
+    match:
+      path: /x
+      query: { q1: v1 }
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/x?q1=v1"}`))); r == nil {
+		t.Fatal("?q1=v1 should match rule requiring q1=v1")
+	}
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/x?q1=v1&q2=v2"}`))); r == nil {
+		t.Fatal("?q1=v1&q2=v2 should match rule requiring q1=v1 (extra params ignored)")
+	}
+}
+
+func TestFindQueryAllKeysRequired(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match:
+      path: /x
+      query:
+        a: "1"
+        b: "2"
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/x?a=1&b=2"}`))); r == nil {
+		t.Fatal("both params present should match")
+	}
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/x?a=1"}`))); r != nil {
+		t.Fatal("missing b should not match")
+	}
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/x?a=1&b=3"}`))); r != nil {
+		t.Fatal("wrong b value should not match")
+	}
+}
+
+func TestFindQueryRepeatedParam(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match:
+      path: /x
+      query: { tag: "alert" }
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/x?tag=info&tag=alert"}`))); r == nil {
+		t.Fatal("matching value among multiple should match")
+	}
+	if r := rs.Find(ExtractTarget([]byte(`{"url":"/x?tag=info&tag=warn"}`))); r != nil {
+		t.Fatal("no matching value among multiple should not match")
+	}
+}
+
+func TestExtractTargetQueryFromPathField(t *testing.T) {
+	body := []byte(`{"path":"/api/items?ref=homepage","method":"GET"}`)
+	tgt := ExtractTarget(body)
+	if tgt.Path != "/api/items" {
+		t.Errorf("path = %q, want /api/items", tgt.Path)
+	}
+	if got := tgt.Query.Get("ref"); got != "homepage" {
+		t.Errorf("Query[ref] = %q, want homepage", got)
+	}
+}
+
+func TestExtractTargetQueryFromRequestURL(t *testing.T) {
+	body := []byte(`{"request":{"url":"https://x/api/items?ref=homepage"}}`)
+	tgt := ExtractTarget(body)
+	if got := tgt.Query.Get("ref"); got != "homepage" {
+		t.Errorf("Query[ref] = %q, want homepage", got)
+	}
+}
+
+func TestExtractTargetNoQueryYieldsNil(t *testing.T) {
+	tgt := ExtractTarget([]byte(`{"url":"/api/items"}`))
+	if tgt.Query != nil {
+		t.Errorf("Query = %v, want nil", tgt.Query)
+	}
+}
+
 func TestPathPrefixWithQueryString(t *testing.T) {
 	rs, _ := Load(writeRules(t, `
 rules:
