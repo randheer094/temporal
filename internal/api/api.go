@@ -170,7 +170,7 @@ func (a *API) processItem(rs *rules.RuleSet, body []byte) int {
 	if rule == nil {
 		return 0
 	}
-	results := rule.Apply(body)
+	results := rule.Apply(body, a.logDaemon)
 	for _, res := range results {
 		a.writeEvent(res.Type, res.Title, res.Message)
 	}

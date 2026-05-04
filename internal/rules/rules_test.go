@@ -118,7 +118,7 @@ rules:
 `))
 	r := rs.Find(Target{Path: "/api/login"})
 	body := []byte(`{"url":"/api/login","request":{"body":{"user":{"name":"jane"}}},"response":{"statusCode":200,"body":{"message":"hi"}}}`)
-	results := r.Apply(body)
+	results := r.Apply(body, nil)
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))
 	}
@@ -143,7 +143,7 @@ rules:
 `))
 	r := rs.Find(Target{Path: "/api/login"})
 	body := []byte(`{"url":"/api/login","request":{"body":{"user":{"name":"jane"}}}}`) // onRequest forward, no response
-	results := r.Apply(body)
+	results := r.Apply(body, nil)
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))
 	}
@@ -167,7 +167,7 @@ rules:
       message: "{e.f}"
 `))
 	r := rs.Find(Target{Path: "/api/x"})
-	results := r.Apply([]byte(`{"url":"/api/x"}`))
+	results := r.Apply([]byte(`{"url":"/api/x"}`), nil)
 	if len(results) != 0 {
 		t.Fatalf("results = %d, want 0 for all-empty", len(results))
 	}
@@ -196,7 +196,7 @@ rules:
 			{"id": 4, "name": "alert: kiwi", "qty": 2}
 		]
 	}`)
-	results := r.Apply(body)
+	results := r.Apply(body, nil)
 	if len(results) != 2 {
 		t.Fatalf("results = %d, want 2: %+v", len(results), results)
 	}
@@ -219,7 +219,7 @@ rules:
       title: "{name}"
 `))
 	r := rs.Find(Target{Path: "/api/x"})
-	if results := r.Apply([]byte(`{"url":"/api/x"}`)); len(results) != 0 {
+	if results := r.Apply([]byte(`{"url":"/api/x"}`), nil); len(results) != 0 {
 		t.Errorf("results = %d, want 0", len(results))
 	}
 }
@@ -269,7 +269,7 @@ rules:
       - { type: b, title: "B {n}", message: "mb" }
 `))
 	r := rs.Find(Target{Path: "/x"})
-	results := r.Apply([]byte(`{"url":"/x","n":"v"}`))
+	results := r.Apply([]byte(`{"url":"/x","n":"v"}`), nil)
 	if len(results) != 2 {
 		t.Fatalf("results = %d, want 2", len(results))
 	}
@@ -302,7 +302,7 @@ rules:
 			{"id":99,"name":"low-stock"}
 		]
 	}`)
-	results := r.Apply(body)
+	results := r.Apply(body, nil)
 	if len(results) != 3 {
 		t.Fatalf("results = %d, want 3", len(results))
 	}
@@ -327,7 +327,7 @@ rules:
 `))
 	r := rs.Find(Target{Path: "/x"})
 	body := []byte(`{"url":"/x","items":[{"name":"foo"},{"name":"bar"}]}`)
-	results := r.Apply(body)
+	results := r.Apply(body, nil)
 	// 2 items × 2 extracts = 4 entries
 	if len(results) != 4 {
 		t.Fatalf("results = %d, want 4", len(results))
@@ -369,5 +369,23 @@ rules:
 	}
 	if rs.Find(tgt) == nil {
 		t.Fatal("expected match")
+	}
+}
+
+func TestScriptFieldParsedFromYAML(t *testing.T) {
+	rs, err := Load(writeRules(t, `
+rules:
+  - name: scripted
+    match: { host: api.example.com }
+    script: myscript.star
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rs.Rules))
+	}
+	if rs.Rules[0].Script != "myscript.star" {
+		t.Errorf("Script = %q, want %q", rs.Rules[0].Script, "myscript.star")
 	}
 }
