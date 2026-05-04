@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"go.starlark.net/starlark"
 )
 
 func writeRules(t *testing.T, body string) string {
@@ -387,5 +389,55 @@ rules:
 	}
 	if rs.Rules[0].Script != "myscript.star" {
 		t.Errorf("Script = %q, want %q", rs.Rules[0].Script, "myscript.star")
+	}
+}
+
+func TestJsonToStarlark_Primitives(t *testing.T) {
+	v, err := jsonToStarlark([]byte(`{"s":"hello","n":42,"f":3.14,"b":true,"null":null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := v.(*starlark.Dict)
+	if !ok {
+		t.Fatalf("expected *starlark.Dict, got %T", v)
+	}
+	check := func(key string, want string) {
+		t.Helper()
+		got, found, err := d.Get(starlark.String(key))
+		if err != nil || !found {
+			t.Errorf("key %q not found", key)
+			return
+		}
+		if got.String() != want {
+			t.Errorf("key %q: got %s, want %s", key, got.String(), want)
+		}
+	}
+	check("s", `"hello"`)
+	check("n", "42")
+	check("b", "True")
+	check("null", "None")
+}
+
+func TestJsonToStarlark_NestedArray(t *testing.T) {
+	v, err := jsonToStarlark([]byte(`{"items":[{"name":"a"},{"name":"b"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := v.(*starlark.Dict)
+	items, found, _ := d.Get(starlark.String("items"))
+	if !found {
+		t.Fatal("items not found")
+	}
+	list, ok := items.(*starlark.List)
+	if !ok {
+		t.Fatalf("items is %T, want *starlark.List", items)
+	}
+	if list.Len() != 2 {
+		t.Fatalf("items len = %d, want 2", list.Len())
+	}
+	first := list.Index(0).(*starlark.Dict)
+	name, _, _ := first.Get(starlark.String("name"))
+	if name.(starlark.String) != "a" {
+		t.Errorf("first item name = %v, want a", name)
 	}
 }
