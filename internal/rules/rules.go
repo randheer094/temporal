@@ -35,7 +35,6 @@ import (
 	"strings"
 
 	"github.com/tidwall/gjson"
-	"go.starlark.net/starlark"
 	"gopkg.in/yaml.v3"
 )
 
@@ -179,12 +178,19 @@ func (e *Extracts) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Rule struct {
-	Name          string   `yaml:"name"`
-	Matches       Matches  `yaml:"match"`
-	Eaches        Eaches   `yaml:"each"`
-	Extracts      Extracts `yaml:"extract"`
-	Script        string   `yaml:"script"`
-	scriptGlobals starlark.StringDict
+	Name       string   `yaml:"name"`
+	Active     *bool    `yaml:"active"`
+	Matches    Matches  `yaml:"match"`
+	Eaches     Eaches   `yaml:"each"`
+	Extracts   Extracts `yaml:"extract"`
+	Script     string   `yaml:"script"`
+	scriptPath string
+}
+
+// IsActive reports whether the rule is enabled. The default is true; a rule
+// is only treated as disabled when `active: false` is set explicitly.
+func (r *Rule) IsActive() bool {
+	return r.Active == nil || *r.Active
 }
 
 type RuleSet struct {
@@ -244,10 +250,13 @@ func Load(path string) (*RuleSet, error) {
 // Find returns the first rule that matches the target. A rule with multiple
 // match blocks fires if any one block matches (OR). A rule with no match
 // block matches every target. Rules with a status constraint only match
-// when t.StatusCode > 0.
+// when t.StatusCode > 0. Rules with `active: false` are skipped.
 func (rs *RuleSet) Find(t Target) *Rule {
 	for i := range rs.Rules {
 		r := &rs.Rules[i]
+		if !r.IsActive() {
+			continue
+		}
 		if r.matchesTarget(t) {
 			return r
 		}
@@ -472,7 +481,7 @@ var placeholder = regexp.MustCompile(`\{([^{}]+)\}`)
 // doesn't write blank log entries.
 func (r *Rule) Apply(jsonBody []byte, logf func(string)) []Result {
 	if r.Script != "" {
-		if r.scriptGlobals == nil {
+		if r.scriptPath == "" {
 			return nil
 		}
 		return r.applyScript(jsonBody, logf)

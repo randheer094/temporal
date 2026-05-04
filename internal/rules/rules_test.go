@@ -2,11 +2,24 @@ package rules
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
-
-	"go.starlark.net/starlark"
 )
+
+// requirePython skips a test when neither python3 nor python is available on
+// PATH. Script-execution tests would otherwise fail in environments without
+// a Python interpreter (some minimal CI images, sandboxes, etc.).
+func requirePython(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("python3"); err == nil {
+		return
+	}
+	if _, err := exec.LookPath("python"); err == nil {
+		return
+	}
+	t.Skip("python3/python not available on PATH")
+}
 
 func writeRules(t *testing.T, body string) string {
 	t.Helper()
@@ -511,12 +524,62 @@ rules:
 	}
 }
 
+// --- active flag --------------------------------------------------------
+
+func TestRuleDefaultsToActive(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: r
+    match: { path: /x }
+    extract: { type: t, title: T, message: M }
+`))
+	if !rs.Rules[0].IsActive() {
+		t.Fatal("rule with no active field should default to active=true")
+	}
+}
+
+func TestRuleActiveFalseSkipped(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: disabled
+    active: false
+    match: { path: /x }
+    extract: { type: t, title: T, message: M }
+  - name: enabled
+    active: true
+    match: { path: /x }
+    extract: { type: t2, title: T2, message: M2 }
+`))
+	r := rs.Find(Target{Path: "/x"})
+	if r == nil {
+		t.Fatal("expected enabled rule to match")
+	}
+	if r.Name != "enabled" {
+		t.Errorf("Find returned %q, want %q (disabled rule should be skipped)", r.Name, "enabled")
+	}
+}
+
+func TestRuleActiveFalseAloneNoMatch(t *testing.T) {
+	rs, _ := Load(writeRules(t, `
+rules:
+  - name: only_disabled
+    active: false
+    match: { path: /x }
+    extract: { type: t, title: T, message: M }
+`))
+	if r := rs.Find(Target{Path: "/x"}); r != nil {
+		t.Fatalf("expected no match (rule disabled), got %q", r.Name)
+	}
+}
+
+// --- script load / parse ------------------------------------------------
+
 func TestScriptFieldParsedFromYAML(t *testing.T) {
 	rs, err := Load(writeRules(t, `
 rules:
   - name: scripted
     match: { host: api.example.com }
-    script: myscript.star
+    script: myscript.py
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -524,88 +587,8 @@ rules:
 	if len(rs.Rules) != 1 {
 		t.Fatalf("expected 1 rule, got %d", len(rs.Rules))
 	}
-	if rs.Rules[0].Script != "myscript.star" {
-		t.Errorf("Script = %q, want %q", rs.Rules[0].Script, "myscript.star")
-	}
-}
-
-func makeStarlarkList(t *testing.T, entries ...map[string]starlark.Value) *starlark.List {
-	t.Helper()
-	var elems []starlark.Value
-	for _, m := range entries {
-		d := new(starlark.Dict)
-		for k, v := range m {
-			d.SetKey(starlark.String(k), v)
-		}
-		elems = append(elems, d)
-	}
-	return starlark.NewList(elems)
-}
-
-func TestStarlarkToResults_BasicEntry(t *testing.T) {
-	list := makeStarlarkList(t, map[string]starlark.Value{
-		"type":  starlark.String("info"),
-		"title": starlark.String("hello"),
-	})
-	results := starlarkToResults("r", list, nil)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	if results[0].Type != "info" || results[0].Title != "hello" {
-		t.Errorf("got %+v", results[0])
-	}
-}
-
-func TestStarlarkToResults_MessageString(t *testing.T) {
-	list := makeStarlarkList(t, map[string]starlark.Value{
-		"type":    starlark.String("info"),
-		"title":   starlark.String("t"),
-		"message": starlark.String("single"),
-	})
-	results := starlarkToResults("r", list, nil)
-	if len(results[0].Message) != 1 || results[0].Message[0] != "single" {
-		t.Errorf("message = %v", results[0].Message)
-	}
-}
-
-func TestStarlarkToResults_MessageList(t *testing.T) {
-	msgs := starlark.NewList([]starlark.Value{starlark.String("a"), starlark.String("b")})
-	list := makeStarlarkList(t, map[string]starlark.Value{
-		"type":    starlark.String("info"),
-		"title":   starlark.String("t"),
-		"message": msgs,
-	})
-	results := starlarkToResults("r", list, nil)
-	if len(results[0].Message) != 2 || results[0].Message[0] != "a" || results[0].Message[1] != "b" {
-		t.Errorf("message = %v", results[0].Message)
-	}
-}
-
-func TestStarlarkToResults_MissingTypeSkipped(t *testing.T) {
-	var logged []string
-	list := makeStarlarkList(t, map[string]starlark.Value{
-		"title": starlark.String("t"),
-	})
-	results := starlarkToResults("r", list, func(msg string) { logged = append(logged, msg) })
-	if len(results) != 0 {
-		t.Errorf("expected 0 results, got %d", len(results))
-	}
-	if len(logged) == 0 {
-		t.Error("expected an error to be logged")
-	}
-}
-
-func TestStarlarkToResults_MissingTitleSkipped(t *testing.T) {
-	var logged []string
-	list := makeStarlarkList(t, map[string]starlark.Value{
-		"type": starlark.String("info"),
-	})
-	results := starlarkToResults("r", list, func(msg string) { logged = append(logged, msg) })
-	if len(results) != 0 {
-		t.Errorf("expected 0 results, got %d", len(results))
-	}
-	if len(logged) == 0 {
-		t.Error("expected an error to be logged")
+	if rs.Rules[0].Script != "myscript.py" {
+		t.Errorf("Script = %q, want %q", rs.Rules[0].Script, "myscript.py")
 	}
 }
 
@@ -619,7 +602,8 @@ func writeScript(t *testing.T, name, body string) string {
 }
 
 func TestCompileScripts_ValidScript(t *testing.T) {
-	dir := writeScript(t, "s.star", `
+	requirePython(t)
+	dir := writeScript(t, "s.py", `
 def process(body):
     return [{"type": "info", "title": "ok"}]
 `)
@@ -627,77 +611,62 @@ def process(body):
 rules:
   - name: r
     match: { path: /x }
-    script: s.star
+    script: s.py
 `))
 	var logged []string
 	rs.CompileScripts(dir, func(msg string) { logged = append(logged, msg) })
 	if len(logged) != 0 {
 		t.Errorf("unexpected log: %v", logged)
 	}
-	if rs.Rules[0].scriptGlobals == nil {
-		t.Error("scriptGlobals should be set after compile")
+	if rs.Rules[0].scriptPath == "" {
+		t.Error("scriptPath should be set after compile")
 	}
 }
 
 func TestCompileScripts_MissingFile(t *testing.T) {
+	requirePython(t)
 	rs, _ := Load(writeRules(t, `
 rules:
   - name: r
     match: { path: /x }
-    script: missing.star
+    script: missing.py
 `))
 	var logged []string
 	rs.CompileScripts(t.TempDir(), func(msg string) { logged = append(logged, msg) })
 	if len(logged) == 0 {
 		t.Error("expected error logged for missing file")
 	}
-	if rs.Rules[0].scriptGlobals != nil {
-		t.Error("scriptGlobals should be nil after failed compile")
+	if rs.Rules[0].scriptPath != "" {
+		t.Error("scriptPath should be empty after failed compile")
 	}
 }
 
 func TestCompileScripts_SyntaxError(t *testing.T) {
-	dir := writeScript(t, "bad.star", `this is not valid starlark @@@@`)
+	requirePython(t)
+	dir := writeScript(t, "bad.py", `def process(body)::::`)
 	rs, _ := Load(writeRules(t, `
 rules:
   - name: r
     match: { path: /x }
-    script: bad.star
+    script: bad.py
 `))
 	var logged []string
 	rs.CompileScripts(dir, func(msg string) { logged = append(logged, msg) })
 	if len(logged) == 0 {
 		t.Error("expected error logged for syntax error")
 	}
-	if rs.Rules[0].scriptGlobals != nil {
-		t.Error("scriptGlobals should be nil after failed compile")
-	}
-}
-
-func TestCompileScripts_NoProcessFunction(t *testing.T) {
-	dir := writeScript(t, "noprocess.star", `x = 1`)
-	rs, _ := Load(writeRules(t, `
-rules:
-  - name: r
-    match: { path: /x }
-    script: noprocess.star
-`))
-	var logged []string
-	rs.CompileScripts(dir, func(msg string) { logged = append(logged, msg) })
-	if len(logged) == 0 {
-		t.Error("expected error logged for missing process function")
-	}
-	if rs.Rules[0].scriptGlobals != nil {
-		t.Error("scriptGlobals should be nil when process not defined")
+	if rs.Rules[0].scriptPath != "" {
+		t.Error("scriptPath should be empty after failed compile")
 	}
 }
 
 func TestApply_ScriptCompileFailDoesNotFallThroughToExtract(t *testing.T) {
+	requirePython(t)
 	rs, err := Load(writeRules(t, `
 rules:
   - name: r
     match: { path: /x }
-    script: missing.star
+    script: missing.py
     extract:
       - type: t
         title: T
@@ -707,8 +676,8 @@ rules:
 	}
 	var logged []string
 	rs.CompileScripts(t.TempDir(), func(msg string) { logged = append(logged, msg) })
-	if rs.Rules[0].scriptGlobals != nil {
-		t.Fatal("scriptGlobals should be nil after failed compile")
+	if rs.Rules[0].scriptPath != "" {
+		t.Fatal("scriptPath should be empty after failed compile")
 	}
 	results := rs.Rules[0].Apply([]byte(`{"path":"/x"}`), nil)
 	if len(results) != 0 {
@@ -721,15 +690,15 @@ func TestCompileScripts_PathTraversalRejected(t *testing.T) {
 rules:
   - name: r
     match: { path: /x }
-    script: ../evil.star
+    script: ../evil.py
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var logged []string
 	rs.CompileScripts(t.TempDir(), func(msg string) { logged = append(logged, msg) })
-	if rs.Rules[0].scriptGlobals != nil {
-		t.Error("scriptGlobals should be nil for path-traversal script name")
+	if rs.Rules[0].scriptPath != "" {
+		t.Error("scriptPath should be empty for path-traversal script name")
 	}
 	if len(logged) == 0 {
 		t.Error("expected a log message for invalid script filename")
@@ -744,19 +713,22 @@ rules:
     extract: { type: t, title: T }
 `))
 	rs.CompileScripts(t.TempDir(), nil)
-	if rs.Rules[0].scriptGlobals != nil {
-		t.Error("scriptGlobals should be nil for non-script rule")
+	if rs.Rules[0].scriptPath != "" {
+		t.Error("scriptPath should be empty for non-script rule")
 	}
 }
 
+// --- script execution ---------------------------------------------------
+
 func loadScriptRule(t *testing.T, scriptBody string) *Rule {
 	t.Helper()
-	dir := writeScript(t, "s.star", scriptBody)
+	requirePython(t)
+	dir := writeScript(t, "s.py", scriptBody)
 	rs, err := Load(writeRules(t, `
 rules:
   - name: scripted
     match: { path: /x }
-    script: s.star
+    script: s.py
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -798,7 +770,7 @@ def process(body):
 func TestApplyScript_RuntimeErrorLogged(t *testing.T) {
 	r := loadScriptRule(t, `
 def process(body):
-    fail("boom")
+    raise Exception("boom")
 `)
 	var logged []string
 	results := r.Apply([]byte(`{}`), func(msg string) { logged = append(logged, msg) })
@@ -826,7 +798,8 @@ def process(body):
 }
 
 func TestApplyScript_IgnoresEachAndExtract(t *testing.T) {
-	dir := writeScript(t, "s.star", `
+	requirePython(t)
+	dir := writeScript(t, "s.py", `
 def process(body):
     return [{"type": "script", "title": "from-script"}]
 `)
@@ -834,7 +807,7 @@ def process(body):
 rules:
   - name: r
     match: { path: /x }
-    script: s.star
+    script: s.py
     each: items
     extract:
       type: extract
@@ -870,52 +843,76 @@ def process(body):
 	}
 }
 
-func TestJsonToStarlark_Primitives(t *testing.T) {
-	v, err := jsonToStarlark([]byte(`{"s":"hello","n":42,"f":3.14,"b":true,"null":null}`))
-	if err != nil {
-		t.Fatal(err)
+// Scripts can use the full Python stdlib — sanity-check that json.loads
+// works for callers parsing a string-valued response body (the original
+// motivation for moving off Starlark).
+func TestApplyScript_CanParseStringJSONBody(t *testing.T) {
+	r := loadScriptRule(t, `
+import json
+def process(body):
+    raw = body["response"]["body"]
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return [{"type": "ok", "title": raw["data"]["name"]}]
+`)
+	results := r.Apply([]byte(`{"response":{"body":"{\"data\":{\"name\":\"hello\"}}"}}`), nil)
+	if len(results) != 1 || results[0].Title != "hello" {
+		t.Fatalf("unexpected results: %+v", results)
 	}
-	d, ok := v.(*starlark.Dict)
-	if !ok {
-		t.Fatalf("expected *starlark.Dict, got %T", v)
-	}
-	check := func(key string, want string) {
-		t.Helper()
-		got, found, err := d.Get(starlark.String(key))
-		if err != nil || !found {
-			t.Errorf("key %q not found", key)
-			return
-		}
-		if got.String() != want {
-			t.Errorf("key %q: got %s, want %s", key, got.String(), want)
-		}
-	}
-	check("s", `"hello"`)
-	check("n", "42")
-	check("b", "True")
-	check("null", "None")
 }
 
-func TestJsonToStarlark_NestedArray(t *testing.T) {
-	v, err := jsonToStarlark([]byte(`{"items":[{"name":"a"},{"name":"b"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := v.(*starlark.Dict)
-	items, found, _ := d.Get(starlark.String("items"))
-	if !found {
-		t.Fatal("items not found")
-	}
-	list, ok := items.(*starlark.List)
-	if !ok {
-		t.Fatalf("items is %T, want *starlark.List", items)
-	}
-	if list.Len() != 2 {
-		t.Fatalf("items len = %d, want 2", list.Len())
-	}
-	first := list.Index(0).(*starlark.Dict)
-	name, _, _ := first.Get(starlark.String("name"))
-	if name.(starlark.String) != "a" {
-		t.Errorf("first item name = %v, want a", name)
+// --- entriesToResults (no Python required) ------------------------------
+
+func TestEntriesToResults_BasicEntry(t *testing.T) {
+	out := entriesToResults("r", []map[string]any{
+		{"type": "info", "title": "hello"},
+	}, nil)
+	if len(out) != 1 || out[0].Type != "info" || out[0].Title != "hello" {
+		t.Errorf("got %+v", out)
 	}
 }
+
+func TestEntriesToResults_MessageString(t *testing.T) {
+	out := entriesToResults("r", []map[string]any{
+		{"type": "info", "title": "t", "message": "single"},
+	}, nil)
+	if len(out[0].Message) != 1 || out[0].Message[0] != "single" {
+		t.Errorf("message = %v", out[0].Message)
+	}
+}
+
+func TestEntriesToResults_MessageList(t *testing.T) {
+	out := entriesToResults("r", []map[string]any{
+		{"type": "info", "title": "t", "message": []any{"a", "b"}},
+	}, nil)
+	if len(out[0].Message) != 2 || out[0].Message[0] != "a" || out[0].Message[1] != "b" {
+		t.Errorf("message = %v", out[0].Message)
+	}
+}
+
+func TestEntriesToResults_MissingTypeSkipped(t *testing.T) {
+	var logged []string
+	out := entriesToResults("r", []map[string]any{
+		{"title": "t"},
+	}, func(msg string) { logged = append(logged, msg) })
+	if len(out) != 0 {
+		t.Errorf("expected 0 results, got %d", len(out))
+	}
+	if len(logged) == 0 {
+		t.Error("expected an error to be logged")
+	}
+}
+
+func TestEntriesToResults_MissingTitleSkipped(t *testing.T) {
+	var logged []string
+	out := entriesToResults("r", []map[string]any{
+		{"type": "info"},
+	}, func(msg string) { logged = append(logged, msg) })
+	if len(out) != 0 {
+		t.Errorf("expected 0 results, got %d", len(out))
+	}
+	if len(logged) == 0 {
+		t.Error("expected an error to be logged")
+	}
+}
+
