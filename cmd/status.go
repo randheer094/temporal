@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
-	"syscall"
+
+	"temporal/internal/pidfile"
 
 	"github.com/spf13/cobra"
 )
@@ -28,28 +28,12 @@ func serverStatus() {
 	if err != nil {
 		log.Fatal("Could not get user's home directory:", err)
 	}
-	logDir := filepath.Join(home, ".temporal")
-	pidFile := filepath.Join(logDir, "daemon.pid")
+	pidFile := filepath.Join(home, ".temporal", "daemon.pid")
 
-	pidData, err := os.ReadFile(pidFile)
-	if err != nil {
-		fmt.Println("Server is not running.")
-		return
+	pid, alive := pidfile.Read(pidFile)
+	if !alive {
+		fmt.Fprintln(os.Stderr, "Server is not running.")
+		os.Exit(1)
 	}
-
-	pid, err := strconv.Atoi(string(pidData))
-	if err != nil {
-		fmt.Println("Invalid PID in pid file.")
-		return
-	}
-
-	// On Unix-like systems, os.FindProcess is a no-op.
-	// We need to send a signal to check if the process exists.
-	// Sending signal 0 doesn't kill the process but checks for its existence.
-	process, _ := os.FindProcess(pid)
-	if err := process.Signal(syscall.Signal(0)); err == nil {
-		fmt.Printf("Server is running with PID: %d\n", pid)
-	} else {
-		fmt.Println("Server is not running, but pid file exists.")
-	}
+	fmt.Printf("Server is running with PID: %d\n", pid)
 }
