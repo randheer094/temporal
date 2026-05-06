@@ -57,18 +57,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag=$(tr -d '[:space:]' < internal/version/VERSION)
-          latest=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
+          raw=$(tr -d '[:space:]' < internal/version/VERSION)
+          # Validate the in-code VERSION shape before stripping the prefix.
+          ./scripts/check-version.sh "$raw"
+          # Released tags and release names are unprefixed (0.5.0, not
+          # v0.5.0), even though VERSION may carry the leading "v".
+          # check-version.sh already treats the two forms as equivalent.
+          tag=${raw#v}
+          latest_raw=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
+          latest=${latest_raw#v}
           if [ "$tag" = "$latest" ]; then
-            echo "VERSION ($tag) matches latest release; nothing to do."
+            echo "VERSION ($raw) matches latest release ($latest_raw); nothing to do."
             echo "released=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Validate the bumped tag before publishing — the same check that
-          # gates manual releases — so a malformed VERSION never lands on
-          # GitHub as a real release.
-          ./scripts/check-version.sh "$tag"
-          echo "VERSION is $tag, latest release is '${latest:-none}' — creating $tag"
+          echo "VERSION is $raw, latest release is '${latest_raw:-none}' — creating $tag"
           gh release create "$tag" \
             --target "$GITHUB_SHA" \
             --title "$tag" \
