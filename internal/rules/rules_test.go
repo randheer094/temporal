@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -861,6 +862,33 @@ def process(body):
 	}
 }
 
+// TestApplyScript_OutputCapped verifies a runaway script output doesn't
+// OOM the daemon: applyScript caps the buffer at scriptStdoutCap, flags
+// overflow, and returns no results.
+func TestApplyScript_OutputCapped(t *testing.T) {
+	// Print a 2MB string to stdout — well past scriptStdoutCap (1MB).
+	r := loadScriptRule(t, `
+import sys
+sys.stdout.write("[" + ("x" * (2 * 1024 * 1024)) + "]")
+def process(body): return []
+`)
+	var logged []string
+	results := r.Apply([]byte(`{}`), func(msg string) { logged = append(logged, msg) })
+	if len(results) != 0 {
+		t.Errorf("expected 0 results on overflow, got %d", len(results))
+	}
+	hit := false
+	for _, msg := range logged {
+		if strings.Contains(msg, "exceeded") {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		t.Errorf("expected an overflow warning, got: %v", logged)
+	}
+}
+
 // --- entriesToResults (no Python required) ------------------------------
 
 func TestEntriesToResults_BasicEntry(t *testing.T) {
@@ -903,6 +931,29 @@ func TestEntriesToResults_MissingTypeSkipped(t *testing.T) {
 	}
 }
 
+func TestValidateFlagsBadStatusPattern(t *testing.T) {
+	rs := &RuleSet{
+		Rules: []Rule{
+			{Name: "ok_int", Matches: Matches{{Status: "404"}}},
+			{Name: "ok_class", Matches: Matches{{Status: "5xx"}}},
+			{Name: "typo_class", Matches: Matches{{Status: "2X X"}}},
+			{Name: "out_of_range", Matches: Matches{{Status: "9xx"}}},
+		},
+	}
+	var logged []string
+	rs.Validate(func(msg string) { logged = append(logged, msg) })
+
+	want := []string{"typo_class", "out_of_range"}
+	if len(logged) != len(want) {
+		t.Fatalf("logged = %#v, want one warning per: %v", logged, want)
+	}
+	for i, name := range want {
+		if !strings.Contains(logged[i], name) {
+			t.Errorf("warning %d = %q, want it to mention %q", i, logged[i], name)
+		}
+	}
+}
+
 func TestEntriesToResults_MissingTitleSkipped(t *testing.T) {
 	var logged []string
 	out := entriesToResults("r", []map[string]any{
@@ -915,4 +966,3 @@ func TestEntriesToResults_MissingTitleSkipped(t *testing.T) {
 		t.Error("expected an error to be logged")
 	}
 }
-

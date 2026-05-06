@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
+	"temporal/internal/pidfile"
 	"temporal/internal/rules"
 
 	"github.com/spf13/cobra"
@@ -49,6 +49,9 @@ func refreshRules() {
 		os.Exit(1)
 	}
 
+	rs.Validate(func(msg string) {
+		fmt.Fprintln(os.Stderr, "rule warning:", msg)
+	})
 	scriptsDir := filepath.Join(logDir, "scripts")
 	rs.CompileScripts(scriptsDir, func(msg string) {
 		fmt.Fprintln(os.Stderr, "script warning:", msg)
@@ -59,8 +62,8 @@ func refreshRules() {
 		fmt.Printf("  - %s\n", r.Name)
 	}
 
-	pid, ok := readDaemonPID(filepath.Join(logDir, "daemon.pid"))
-	if !ok {
+	pid, alive := pidfile.Read(filepath.Join(logDir, "daemon.pid"))
+	if !alive {
 		fmt.Println("Daemon is not running — rules will load on next start.")
 		return
 	}
@@ -69,21 +72,4 @@ func refreshRules() {
 		os.Exit(1)
 	}
 	fmt.Printf("Refreshed running daemon (PID %d).\n", pid)
-}
-
-// readDaemonPID returns the daemon PID from the file, or (_, false) if the
-// file is missing or the process isn't actually alive.
-func readDaemonPID(pidFile string) (int, bool) {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return 0, false
-	}
-	pid, err := strconv.Atoi(string(data))
-	if err != nil {
-		return 0, false
-	}
-	if err := syscall.Kill(pid, syscall.Signal(0)); err != nil {
-		return 0, false
-	}
-	return pid, true
 }

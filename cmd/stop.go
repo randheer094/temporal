@@ -2,12 +2,13 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
+	"time"
+
+	"temporal/internal/pidfile"
 
 	"github.com/spf13/cobra"
 )
@@ -24,6 +25,11 @@ func init() {
 	serverCmd.AddCommand(stopCmd)
 }
 
+// stopWaitTimeout caps how long we wait for the daemon to exit after
+// SIGTERM. A second `start` issued immediately after `stop` shouldn't
+// race with the previous process still listening on :8005.
+const stopWaitTimeout = 3 * time.Second
+
 func stopServer() {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -32,37 +38,32 @@ func stopServer() {
 	logDir := filepath.Join(home, ".temporal")
 	pidFile := filepath.Join(logDir, "daemon.pid")
 
-	pidData, err := ioutil.ReadFile(pidFile)
-	if err != nil {
+	pid, alive := pidfile.Read(pidFile)
+	if !alive {
 		fmt.Println("Server is not running.")
+		pidfile.Remove(pidFile)
 		return
 	}
 
-	pid, err := strconv.Atoi(string(pidData))
-	if err != nil {
-		log.Fatal("Invalid PID in pid file:", err)
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		// If FindProcess fails, the process likely doesn't exist.
-		fmt.Println("Server is not running.")
-		os.Remove(pidFile)
-		return
-	}
-
-	// Send a signal to the process to terminate it
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		log.Println("Failed to send signal to process:", err)
-		// If signaling fails, maybe the process is already gone
-		os.Remove(pidFile)
+		pidfile.Remove(pidFile)
 		return
 	}
 
-	// Clean up the pid file
-	if err := os.Remove(pidFile); err != nil {
-		log.Println("Failed to remove pid file:", err)
+	// Poll signal-0 until the process is gone. If it lingers past the
+	// timeout, leave the PID file in place and tell the user — they may
+	// want to investigate before sending SIGKILL.
+	deadline := time.Now().Add(stopWaitTimeout)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, syscall.Signal(0)); err != nil {
+			pidfile.Remove(pidFile)
+			fmt.Println("Server stopped.")
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	fmt.Println("Server stopped.")
+	fmt.Fprintf(os.Stderr, "Server (PID %d) did not exit within %s. Send SIGKILL manually if needed.\n", pid, stopWaitTimeout)
+	os.Exit(1)
 }

@@ -14,8 +14,12 @@ test:
 	go test -count=1 $(PKG)
 
 lint: vet
-	gofmt -l . | tee /tmp/gofmt.out
-	@! [ -s /tmp/gofmt.out ]
+	@out=$$(gofmt -l .); \
+	if [ -n "$$out" ]; then \
+		echo "gofmt: the following files need formatting:"; \
+		echo "$$out"; \
+		exit 1; \
+	fi
 
 tidy:
 	go mod tidy

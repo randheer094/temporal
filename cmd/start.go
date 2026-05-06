@@ -2,11 +2,11 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
+
+	"temporal/internal/pidfile"
 
 	"github.com/spf13/cobra"
 )
@@ -35,14 +35,19 @@ func startServer() {
 		log.Fatal("Failed to create log directory:", err)
 	}
 
-	// Check if the process is already running
-	if _, err := os.Stat(pidFile); err == nil {
-		fmt.Println("Server is already running.")
+	// If a live daemon already owns the PID file, bail out with its PID
+	// so the user knows what to stop. If the file exists but the process
+	// is gone, treat it as stale and remove it before retrying.
+	if pid, alive := pidfile.Read(pidFile); alive {
+		fmt.Printf("Server is already running with PID %d. Run `temporal server stop` to stop it.\n", pid)
 		return
 	}
+	pidfile.Remove(pidFile)
 
-	// Create a new process
-	executable, _ := os.Executable()
+	executable, err := os.Executable()
+	if err != nil {
+		log.Fatal("Could not resolve own executable path:", err)
+	}
 	procAttr := &os.ProcAttr{
 		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
 	}
@@ -51,9 +56,10 @@ func startServer() {
 		log.Fatal("Failed to start server:", err)
 	}
 
-	// Write the PID to the pid file
-	err = ioutil.WriteFile(pidFile, []byte(strconv.Itoa(process.Pid)), 0644)
-	if err != nil {
+	if err := pidfile.Acquire(pidFile, process.Pid); err != nil {
+		// Couldn't claim the PID file — kill the orphan we just spawned
+		// rather than leaving it running without a way to stop it.
+		_ = process.Kill()
 		log.Fatal("Failed to write pid file:", err)
 	}
 

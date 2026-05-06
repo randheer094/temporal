@@ -78,6 +78,66 @@ func TestAppendsToExistingFile(t *testing.T) {
 	}
 }
 
+func TestRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.log")
+	const maxBytes = 64
+
+	w, err := NewWithMaxSize(path, maxBytes)
+	if err != nil {
+		t.Fatal("NewWithMaxSize failed:", err)
+	}
+
+	// Write enough to cross maxBytes and force one rotation, then keep
+	// writing so the active file has fresh content too.
+	const line = "0123456789ABCDEF\n" // 17 bytes
+	for i := 0; i < 6; i++ {
+		w.Write(line)
+	}
+	w.Close()
+
+	backup, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("backup not created: %v", err)
+	}
+	if len(backup) < maxBytes {
+		t.Errorf("backup size = %d, want >= %d", len(backup), maxBytes)
+	}
+
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("active file missing after rotation: %v", err)
+	}
+	// The post-rotation writes ended up here.
+	if !strings.Contains(string(active), "0123456789ABCDEF") {
+		t.Errorf("active file content unexpected: %q", string(active))
+	}
+}
+
+func TestRotationOverwritesPreviousBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.log")
+	if err := os.WriteFile(path+".1", []byte("stale-backup\n"), 0640); err != nil {
+		t.Fatal("seed backup failed:", err)
+	}
+
+	const maxBytes = 32
+	w, err := NewWithMaxSize(path, maxBytes)
+	if err != nil {
+		t.Fatal("NewWithMaxSize failed:", err)
+	}
+	for i := 0; i < 4; i++ {
+		w.Write("0123456789ABCDEF\n")
+	}
+	w.Close()
+
+	backup, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if strings.Contains(string(backup), "stale-backup") {
+		t.Errorf("rotation did not replace stale backup: %q", string(backup))
+	}
+}
+
 func TestNewReturnsErrorForUnwritablePath(t *testing.T) {
 	// A path under a regular file (not a directory) cannot be opened.
 	dir := t.TempDir()

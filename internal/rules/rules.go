@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -366,6 +367,46 @@ func matchStatus(pattern string, code int) bool {
 	return want == code
 }
 
+// validateStatusPattern reports whether pattern is a syntactically valid
+// match.status value. matchStatus silently returns false for malformed
+// patterns at request time; the daemon calls this at load time so users
+// can spot typos like "2X X" before they cause a rule to never fire.
+func validateStatusPattern(pattern string) error {
+	if pattern == "" {
+		return nil
+	}
+	p := strings.ToLower(strings.TrimSpace(pattern))
+	if len(p) == 3 && strings.HasSuffix(p, "xx") {
+		switch p[0] {
+		case '1', '2', '3', '4', '5':
+			return nil
+		}
+		return fmt.Errorf("expected NXX where N is 1-5, or an integer, got %q", pattern)
+	}
+	if _, err := strconv.Atoi(p); err != nil {
+		return fmt.Errorf("expected NXX where N is 1-5, or an integer, got %q", pattern)
+	}
+	return nil
+}
+
+// Validate inspects each rule's match conditions and reports any that
+// would silently never fire (e.g. unparseable status patterns) via logf.
+// Mirrors CompileScripts in style: it never errors, just warns, so a
+// daemon with a partly-broken rules file still serves the good rules.
+func (rs *RuleSet) Validate(logf func(string)) {
+	if logf == nil {
+		return
+	}
+	for i := range rs.Rules {
+		r := &rs.Rules[i]
+		for _, m := range r.Matches {
+			if err := validateStatusPattern(m.Status); err != nil {
+				logf(fmt.Sprintf("rule %s: %v", r.Name, err))
+			}
+		}
+	}
+}
+
 // ExtractTarget pulls the matching values out of a JSON body, accommodating
 // the various shapes a Proxyman script (onRequest or onResponse) or generic
 // client might forward.
@@ -492,12 +533,15 @@ func (r *Rule) Apply(jsonBody []byte, logf func(string)) []Result {
 	}
 	out := make([]Result, 0, len(bodies)*len(r.Extracts))
 	for _, b := range bodies {
+		// Parse the context body once per body so each placeholder lookup
+		// is a cheap walk over the parsed result instead of a fresh parse.
+		parsed := gjson.ParseBytes(b)
 		for _, ex := range r.Extracts {
 			res := Result{
 				RuleName: r.Name,
-				Type:     render(ex.Type, b),
-				Title:    render(ex.Title, b),
-				Message:  renderMessages(ex.Message, b),
+				Type:     render(ex.Type, parsed),
+				Title:    render(ex.Title, parsed),
+				Message:  renderMessages(ex.Message, parsed),
 			}
 			if !res.Empty() {
 				out = append(out, res)
@@ -511,9 +555,10 @@ func (r *Rule) contextBodies(jsonBody []byte) [][]byte {
 	if len(r.Eaches) == 0 {
 		return [][]byte{jsonBody}
 	}
+	parsed := gjson.ParseBytes(jsonBody)
 	var out [][]byte
 	for _, path := range r.Eaches {
-		got := gjson.GetBytes(jsonBody, path)
+		got := parsed.Get(path)
 		if !got.Exists() {
 			continue
 		}
@@ -529,23 +574,23 @@ func (r *Rule) contextBodies(jsonBody []byte) [][]byte {
 	return out
 }
 
-func render(tpl string, body []byte) string {
+func render(tpl string, parsed gjson.Result) string {
 	if tpl == "" {
 		return ""
 	}
 	return placeholder.ReplaceAllStringFunc(tpl, func(m string) string {
 		path := m[1 : len(m)-1]
-		return gjson.GetBytes(body, path).String()
+		return parsed.Get(path).String()
 	})
 }
 
-func renderMessages(tpls []string, body []byte) []string {
+func renderMessages(tpls []string, parsed gjson.Result) []string {
 	if len(tpls) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(tpls))
 	for _, tpl := range tpls {
-		s := render(tpl, body)
+		s := render(tpl, parsed)
 		if s != "" {
 			out = append(out, s)
 		}

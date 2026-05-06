@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -58,7 +57,7 @@ func TestLogEventHandler(t *testing.T) {
 		t.Errorf("body = %q", rr.Body.String())
 	}
 
-	content, err := ioutil.ReadFile(filepath.Join(dir, "events.log"))
+	content, err := os.ReadFile(filepath.Join(dir, "events.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,6 +292,39 @@ func TestLogsJSONPaginationAndFilter(t *testing.T) {
 	}
 	if filtered.TotalPages != 2 {
 		t.Errorf("total_pages = %d, want 2", filtered.TotalPages)
+	}
+}
+
+func TestLogsJSONRejectsInvalidParams(t *testing.T) {
+	a, _ := NewAPI(t.TempDir())
+	defer a.Close()
+
+	cases := []string{
+		"/logs.json?page=abc",
+		"/logs.json?size=xyz",
+		"/logs.json?page=0",
+		"/logs.json?size=-1",
+	}
+	for _, url := range cases {
+		rr := httptest.NewRecorder()
+		a.logsJSONHandler(rr, httptest.NewRequest(http.MethodGet, url, nil))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", url, rr.Code)
+		}
+	}
+}
+
+func TestDeleteLogByIDRejectsOversizedID(t *testing.T) {
+	a, _ := NewAPI(t.TempDir())
+	defer a.Close()
+
+	huge := strings.Repeat("x", maxIDLength+1)
+	req := httptest.NewRequest(http.MethodDelete, "/logs/"+huge, nil)
+	req.SetPathValue("id", huge)
+	rr := httptest.NewRecorder()
+	a.deleteLogByIDHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
 	}
 }
 
