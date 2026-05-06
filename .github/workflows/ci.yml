@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   test:
     name: Vet, fmt, test
@@ -31,3 +34,52 @@ jobs:
 
       - name: go test
         run: go test -race -count=1 ./...
+
+  # auto-release fires when a PR merge to main bumped internal/version/VERSION
+  # past the latest GitHub release tag. It validates the new tag, creates the
+  # release pinned to this commit, then triggers the build workflow inline so
+  # binaries get attached. We have to call release.yml directly via
+  # workflow_call because GitHub does not fire release events for releases
+  # created with the default GITHUB_TOKEN (anti-recursion safeguard).
+  auto-release:
+    name: Release if VERSION bumped
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.maybe.outputs.released }}
+      tag: ${{ steps.maybe.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create release if VERSION differs from latest
+        id: maybe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=$(tr -d '[:space:]' < internal/version/VERSION)
+          latest=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
+          if [ "$tag" = "$latest" ]; then
+            echo "VERSION ($tag) matches latest release; nothing to do."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Validate the bumped tag before publishing — the same check that
+          # gates manual releases — so a malformed VERSION never lands on
+          # GitHub as a real release.
+          ./scripts/check-version.sh "$tag"
+          echo "VERSION is $tag, latest release is '${latest:-none}' — creating $tag"
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --generate-notes
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build-release:
+    name: Build release binaries
+    needs: auto-release
+    if: needs.auto-release.outputs.released == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.auto-release.outputs.tag }}
