@@ -569,7 +569,7 @@ func (a *API) reopenWriter() error {
 
 func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0640); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

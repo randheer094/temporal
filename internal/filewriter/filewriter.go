@@ -25,7 +25,7 @@ func New(path string) (*Writer, error) {
 // NewWithMaxSize creates a writer that rotates the file to "<path>.1" when
 // it exceeds maxBytes. A maxBytes of 0 disables rotation.
 func NewWithMaxSize(path string, maxBytes int64) (*Writer, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 	if err != nil {
 		return nil, fmt.Errorf("could not open file %s: %w", path, err)
 	}
@@ -80,7 +80,7 @@ func (w *Writer) rotate(f *os.File) (*os.File, error) {
 	if err := os.Rename(w.path, backup); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	return os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 }
 
 func (w *Writer) Write(s string) {
