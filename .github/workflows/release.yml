@@ -1,8 +1,19 @@
 name: Release binaries
 
+# Two entry points:
+#   release: published — manual GitHub release flow
+#   workflow_call      — invoked by ci.yml after auto-creating a release
+#                        from a VERSION bump (GITHUB_TOKEN-created releases
+#                        don't fire release events, so we call directly).
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to verify and attach binaries to"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,7 +28,7 @@ jobs:
 
       - name: Compare tag to internal/version/VERSION
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: ./scripts/check-version.sh "$RELEASE_TAG"
 
       - name: Set up Go
@@ -75,6 +86,7 @@ jobs:
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
           files: |
             ${{ matrix.asset }}
             ${{ matrix.asset }}.sha256
