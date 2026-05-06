@@ -27,6 +27,12 @@ var (
 // returns 200 so a buggy script can't take down ingestion.
 const scriptTimeout = 5 * time.Second
 
+// scriptStdoutCap limits how much output we'll buffer from a single
+// script invocation. A buggy or malicious script that writes unbounded
+// JSON to stdout can't OOM the daemon; we log the overflow and skip the
+// entry instead. 1MB is plenty for the multi-entry result lists we expect.
+const scriptStdoutCap = 1 << 20
+
 // pythonRunner is a tiny stdin/stdout shim that loads the user's script as
 // a Python module, calls process(body) with the JSON body parsed from stdin,
 // and writes the returned list of dicts as JSON to stdout. Keeping this
@@ -62,10 +68,14 @@ func detectPython() (string, error) {
 // up at load time instead of on the first matching event. Rules whose
 // script fails validation have scriptPath left blank, which Apply treats as
 // "skip" — the failure is logged via logf for the daemon's main log.
+//
+// Inactive rules are skipped: a buggy script attached to `active: false`
+// shouldn't spam the log on every reload because it'll never run anyway.
 func (rs *RuleSet) CompileScripts(scriptsDir string, logf func(string)) {
+	resolvedScriptsDir, dirErr := filepath.EvalSymlinks(scriptsDir)
 	for i := range rs.Rules {
 		r := &rs.Rules[i]
-		if r.Script == "" {
+		if r.Script == "" || !r.IsActive() {
 			continue
 		}
 		if filepath.Base(r.Script) != r.Script {
@@ -75,14 +85,39 @@ func (rs *RuleSet) CompileScripts(scriptsDir string, logf func(string)) {
 			continue
 		}
 		fullPath := filepath.Join(scriptsDir, r.Script)
-		if err := validatePythonSyntax(fullPath); err != nil {
+		// Resolve symlinks and ensure the final target stays under
+		// scriptsDir, so a symlink in scripts/ can't be used to read
+		// (or run) a file elsewhere on disk.
+		realPath, err := filepath.EvalSymlinks(fullPath)
+		if err != nil {
 			if logf != nil {
 				logf(fmt.Sprintf("script %s: %v", r.Script, err))
 			}
 			continue
 		}
-		r.scriptPath = fullPath
+		if dirErr != nil || !isUnder(realPath, resolvedScriptsDir) {
+			if logf != nil {
+				logf(fmt.Sprintf("script %s: resolves outside %s — refusing to load", r.Script, scriptsDir))
+			}
+			continue
+		}
+		if err := validatePythonSyntax(realPath); err != nil {
+			if logf != nil {
+				logf(fmt.Sprintf("script %s: %v", r.Script, err))
+			}
+			continue
+		}
+		r.scriptPath = realPath
 	}
+}
+
+// isUnder reports whether path is the same as, or a descendant of, root.
+// Both arguments must already be absolute and symlink-resolved.
+func isUnder(path, root string) bool {
+	if path == root {
+		return true
+	}
+	return strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 func validatePythonSyntax(path string) error {
@@ -118,8 +153,9 @@ func (r *Rule) applyScript(jsonBody []byte, logf func(string)) []Result {
 
 	cmd := exec.CommandContext(ctx, py, "-c", pythonRunner, r.scriptPath)
 	cmd.Stdin = bytes.NewReader(jsonBody)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout := &capWriter{cap: scriptStdoutCap}
+	var stderr bytes.Buffer
+	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
@@ -136,7 +172,14 @@ func (r *Rule) applyScript(jsonBody []byte, logf func(string)) []Result {
 		return nil
 	}
 
-	out := bytes.TrimSpace(stdout.Bytes())
+	if stdout.overflow {
+		if logf != nil {
+			logf(fmt.Sprintf("rule %s: script output exceeded %d bytes — skipping", r.Name, scriptStdoutCap))
+		}
+		return nil
+	}
+
+	out := bytes.TrimSpace(stdout.buf.Bytes())
 	if len(out) == 0 {
 		return nil
 	}
@@ -148,6 +191,30 @@ func (r *Rule) applyScript(jsonBody []byte, logf func(string)) []Result {
 		return nil
 	}
 	return entriesToResults(r.Name, entries, logf)
+}
+
+// capWriter buffers up to cap bytes and silently drops the rest while
+// flagging overflow=true. Pretending to consume the dropped bytes keeps
+// the script from blocking on a full pipe; the caller treats overflow as
+// an error after the process exits.
+type capWriter struct {
+	buf      bytes.Buffer
+	cap      int
+	overflow bool
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	remaining := w.cap - w.buf.Len()
+	if remaining <= 0 {
+		w.overflow = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		w.buf.Write(p[:remaining])
+		w.overflow = true
+		return len(p), nil
+	}
+	return w.buf.Write(p)
 }
 
 func entriesToResults(ruleName string, entries []map[string]any, logf func(string)) []Result {

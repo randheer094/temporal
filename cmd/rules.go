@@ -49,6 +49,9 @@ func refreshRules() {
 		os.Exit(1)
 	}
 
+	rs.Validate(func(msg string) {
+		fmt.Fprintln(os.Stderr, "rule warning:", msg)
+	})
 	scriptsDir := filepath.Join(logDir, "scripts")
 	rs.CompileScripts(scriptsDir, func(msg string) {
 		fmt.Fprintln(os.Stderr, "script warning:", msg)
