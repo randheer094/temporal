@@ -131,13 +131,13 @@ func (a *API) logEventHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		a.logDaemon("read body failed: " + err.Error())
 		respondOK(w, "ignored")
 		return
 	}
-	defer r.Body.Close()
 
 	a.rulesMu.RLock()
 	rs := a.rules
@@ -221,8 +221,7 @@ func newID() string {
 }
 
 func respondOK(w http.ResponseWriter, status string) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": status})
+	respondJSON(w, map[string]string{"status": status})
 }
 
 // @Summary Log an event
@@ -291,13 +290,15 @@ func (a *API) logsPageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) logsJSONHandler(w http.ResponseWriter, r *http.Request) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if page < 1 {
-		page = 1
+	page, err := parsePageParam(r.URL.Query().Get("page"), 1)
+	if err != nil {
+		http.Error(w, "invalid page: "+err.Error(), http.StatusBadRequest)
+		return
 	}
-	size, _ := strconv.Atoi(r.URL.Query().Get("size"))
-	if size <= 0 {
-		size = defaultPageSize
+	size, err := parsePageParam(r.URL.Query().Get("size"), defaultPageSize)
+	if err != nil {
+		http.Error(w, "invalid size: "+err.Error(), http.StatusBadRequest)
+		return
 	}
 	if size > maxPageSize {
 		size = maxPageSize
@@ -350,6 +351,8 @@ func (a *API) logsCSVHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	entries = applyFilters(entries, typeFilter, query)
 
+	// filename is built from time.Now() only — no user input. Keep it
+	// that way: any future change must sanitize before embedding here.
 	filename := "temporal-logs-" + time.Now().UTC().Format("20060102-150405") + ".csv"
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
@@ -485,11 +488,20 @@ func entryMatches(e LogEntry, typeFilter, query string) bool {
 	return true
 }
 
+// maxIDLength caps the length of an entry ID accepted by the delete
+// handler. IDs we generate are 8 hex chars; 64 leaves headroom for any
+// future format without letting clients hand us multi-MB path values.
+const maxIDLength = 64
+
 // deleteLogByIDHandler removes a single entry by ID.
 func (a *API) deleteLogByIDHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	if len(id) > maxIDLength {
+		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
 	keep := func(e LogEntry) bool { return e.ID != id }
@@ -509,6 +521,23 @@ func (a *API) deleteLogByIDHandler(w http.ResponseWriter, r *http.Request) {
 func respondJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// parsePageParam parses a positive integer pagination value. An empty
+// string returns the default; an unparseable string returns an error so
+// the handler can reply 400 instead of silently coercing to 0.
+func parsePageParam(raw string, defaultValue int) (int, error) {
+	if raw == "" {
+		return defaultValue, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("not an integer: %q", raw)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("must be >= 1, got %d", n)
+	}
+	return n, nil
 }
 
 // rewriteEvents pauses the writer, rewrites both the active log and the

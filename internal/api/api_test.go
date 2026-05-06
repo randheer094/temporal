@@ -295,6 +295,39 @@ func TestLogsJSONPaginationAndFilter(t *testing.T) {
 	}
 }
 
+func TestLogsJSONRejectsInvalidParams(t *testing.T) {
+	a, _ := NewAPI(t.TempDir())
+	defer a.Close()
+
+	cases := []string{
+		"/logs.json?page=abc",
+		"/logs.json?size=xyz",
+		"/logs.json?page=0",
+		"/logs.json?size=-1",
+	}
+	for _, url := range cases {
+		rr := httptest.NewRecorder()
+		a.logsJSONHandler(rr, httptest.NewRequest(http.MethodGet, url, nil))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", url, rr.Code)
+		}
+	}
+}
+
+func TestDeleteLogByIDRejectsOversizedID(t *testing.T) {
+	a, _ := NewAPI(t.TempDir())
+	defer a.Close()
+
+	huge := strings.Repeat("x", maxIDLength+1)
+	req := httptest.NewRequest(http.MethodDelete, "/logs/"+huge, nil)
+	req.SetPathValue("id", huge)
+	rr := httptest.NewRecorder()
+	a.deleteLogByIDHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+}
+
 func TestLogsJSONReadsRotatedBackup(t *testing.T) {
 	dir := t.TempDir()
 	old := `{"id":"a1","timestamp":"2024-01-01T00:00:00Z","type":"legacy","title":"old-title","message":["old-msg"]}` + "\n"
