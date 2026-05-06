@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -58,7 +57,7 @@ func TestLogEventHandler(t *testing.T) {
 		t.Errorf("body = %q", rr.Body.String())
 	}
 
-	content, err := ioutil.ReadFile(filepath.Join(dir, "events.log"))
+	content, err := os.ReadFile(filepath.Join(dir, "events.log"))
 	if err != nil {
 		t.Fatal(err)
 	}

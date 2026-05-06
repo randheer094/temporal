@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -52,7 +51,7 @@ func startServer() {
 	}
 
 	// Write the PID to the pid file
-	err = ioutil.WriteFile(pidFile, []byte(strconv.Itoa(process.Pid)), 0644)
+	err = os.WriteFile(pidFile, []byte(strconv.Itoa(process.Pid)), 0644)
 	if err != nil {
 		log.Fatal("Failed to write pid file:", err)
 	}

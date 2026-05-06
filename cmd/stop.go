@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -32,7 +31,7 @@ func stopServer() {
 	logDir := filepath.Join(home, ".temporal")
 	pidFile := filepath.Join(logDir, "daemon.pid")
 
-	pidData, err := ioutil.ReadFile(pidFile)
+	pidData, err := os.ReadFile(pidFile)
 	if err != nil {
 		fmt.Println("Server is not running.")
 		return

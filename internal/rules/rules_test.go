@@ -915,4 +915,3 @@ func TestEntriesToResults_MissingTitleSkipped(t *testing.T) {
 		t.Error("expected an error to be logged")
 	}
 }
-
