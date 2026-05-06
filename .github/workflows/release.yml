@@ -35,11 +35,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goarch: arm64
+          - goos: darwin
+            goarch: arm64
             asset: temporal-macos-arm64
-          - goarch: amd64
+            runner: macos-14
+          - goos: darwin
+            goarch: amd64
             asset: temporal-macos-x86_64
-    runs-on: macos-14
+            runner: macos-14
+          - goos: linux
+            goarch: amd64
+            asset: temporal-linux-x86_64
+            runner: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            asset: temporal-linux-arm64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
@@ -52,12 +64,17 @@ jobs:
 
       - name: Build binary
         env:
-          GOOS: darwin
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build -trimpath -ldflags="-s -w" -o ${{ matrix.asset }} .
 
+      - name: Generate SHA256 checksum
+        run: shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
