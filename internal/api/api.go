@@ -340,15 +340,17 @@ func (a *API) logsJSONHandler(w http.ResponseWriter, r *http.Request) {
 
 // logsCSVHandler streams a CSV export of all entries that match the same
 // ?type= and ?q= filters /logs.json uses (no pagination — the full filtered
-// set). Each entry produces one row per message line; entries with no
-// messages still produce a single row with an empty message column.
+// set). Rows are ordered oldest-first so the most recent event lands at the
+// bottom. Each entry produces one row per message line, but the
+// timestamp/type/title are written only on the first row of an entry and left
+// blank on the continuation rows so the shared event info isn't repeated.
 func (a *API) logsCSVHandler(w http.ResponseWriter, r *http.Request) {
 	typeFilter := r.URL.Query().Get("type")
 	query := r.URL.Query().Get("q")
 
 	entries := a.readAllEvents()
 	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Timestamp > entries[j].Timestamp
+		return entries[i].Timestamp < entries[j].Timestamp
 	})
 	entries = applyFilters(entries, typeFilter, query)
 
@@ -361,21 +363,40 @@ func (a *API) logsCSVHandler(w http.ResponseWriter, r *http.Request) {
 	cw := csv.NewWriter(w)
 	cw.Write([]string{"timestamp", "type", "title", "message"})
 	for _, e := range entries {
-		var msgs []string
-		for _, m := range e.Message {
-			if strings.TrimSpace(m) != "" {
-				msgs = append(msgs, m)
-			}
-		}
+		msgs := nonEmptyMessages(e.Message)
 		if len(msgs) == 0 {
 			cw.Write([]string{e.Timestamp, e.Type, e.Title, ""})
 			continue
 		}
-		for _, m := range msgs {
-			cw.Write([]string{e.Timestamp, e.Type, e.Title, m})
+		for i, m := range msgs {
+			if i == 0 {
+				cw.Write([]string{e.Timestamp, e.Type, e.Title, m})
+			} else {
+				// Continuation row: leave the shared event columns blank so
+				// the timestamp/type/title aren't repeated for every param.
+				cw.Write([]string{"", "", "", m})
+			}
 		}
 	}
 	cw.Flush()
+}
+
+// nonEmptyMessages drops blank message lines and params whose value is empty
+// (e.g. "ip=" or "total:"), which is what the rule engine emits when a
+// templated field is missing from the payload.
+func nonEmptyMessages(messages []string) []string {
+	var out []string
+	for _, m := range messages {
+		s := strings.TrimSpace(m)
+		if s == "" {
+			continue
+		}
+		if strings.HasSuffix(s, "=") || strings.HasSuffix(s, ":") {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // readAllEvents merges the active log and the rotated backup so the UI can
