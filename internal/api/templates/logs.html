@@ -208,10 +208,17 @@
     // the page flicker and replays the fade-in animation on every entry.
     const rendered = new Map();
 
-    // Normalize an entry's message field to an array and drop empty/null values.
+    // Normalize an entry's message field to an array and drop empty/null
+    // values as well as params whose value is empty (e.g. "ip=" or "total:").
     function cleanMessages(e) {
       const messages = Array.isArray(e.message) ? e.message : (e.message ? [e.message] : []);
-      return messages.filter((m) => m != null && String(m).trim() !== "");
+      return messages.filter((m) => {
+        if (m == null) return false;
+        const s = String(m).trim();
+        if (s === "") return false;
+        if (/[=:]$/.test(s)) return false;
+        return true;
+      });
     }
 
     function entrySignature(e) {

@@ -827,10 +827,53 @@ rules:
 			t.Errorf("missing %q in CSV:\n%s", want, out)
 		}
 	}
-	// Title and type should repeat on every row.
+	// Shared event info (timestamp/type/title) is written only on the first
+	// row; continuation rows leave those columns blank.
 	loginCount := strings.Count(out, ",Login,")
-	if loginCount != 3 {
-		t.Errorf("title repeats = %d, want 3:\n%s", loginCount, out)
+	if loginCount != 1 {
+		t.Errorf("title repeats = %d, want 1:\n%s", loginCount, out)
+	}
+	if !strings.Contains(out, "\n,,,ua=curl\n") || !strings.Contains(out, ",,,session=abc") {
+		t.Errorf("continuation rows should have blank event columns:\n%s", out)
+	}
+}
+
+func TestLogsCSVExportOrderAndEmptyParams(t *testing.T) {
+	// CSV rows are ordered oldest-first (most recent at the bottom) and params
+	// that rendered with an empty value (e.g. "ip=") are dropped.
+	dir := t.TempDir()
+	writeRules(t, dir, `
+rules:
+  - name: visit
+    match: { path: /api/x }
+    extract:
+      type: "user_action"
+      title: "{title}"
+      message:
+        - "ip={ip}"
+        - "ua={ua}"
+`)
+	a, _ := NewAPI(dir)
+	// First event: ua is missing so "ua=" must be dropped.
+	a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events",
+		bytes.NewBufferString(`{"url":"/api/x","title":"first","ip":"1.1.1.1"}`)))
+	time.Sleep(2 * time.Millisecond)
+	a.logEventHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/events",
+		bytes.NewBufferString(`{"url":"/api/x","title":"second","ip":"2.2.2.2","ua":"curl"}`)))
+	a.Close()
+
+	a2, _ := NewAPI(dir)
+	defer a2.Close()
+	rr := httptest.NewRecorder()
+	a2.logsCSVHandler(rr, httptest.NewRequest(http.MethodGet, "/logs.csv", nil))
+	out := rr.Body.String()
+
+	if strings.Contains(out, "ua=\n") || strings.Contains(out, "ua=\"") {
+		t.Errorf("empty-value param should be dropped:\n%s", out)
+	}
+	// Oldest entry ("first") must appear before the newest ("second").
+	if strings.Index(out, "first") > strings.Index(out, "second") {
+		t.Errorf("rows should be oldest-first:\n%s", out)
 	}
 }
 
