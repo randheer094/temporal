@@ -208,18 +208,23 @@
     // the page flicker and replays the fade-in animation on every entry.
     const rendered = new Map();
 
-    function entrySignature(e) {
+    // Normalize an entry's message field to an array and drop empty/null values.
+    function cleanMessages(e) {
       const messages = Array.isArray(e.message) ? e.message : (e.message ? [e.message] : []);
-      return JSON.stringify([e.timestamp, e.type, e.title, messages]);
+      return messages.filter((m) => m != null && String(m).trim() !== "");
+    }
+
+    function entrySignature(e) {
+      return JSON.stringify([e.timestamp, e.type, e.title, cleanMessages(e)]);
     }
 
     function buildEntryEl(e) {
       const li = document.createElement("li");
       li.className = "card px-3 py-1.5 relative group animate-fade-in";
-      const messages = Array.isArray(e.message) ? e.message : (e.message ? [e.message] : []);
-      const messagesHTML = messages.length
-        ? `<div class="mono text-[11px] text-ink-500 mt-0.5 break-words leading-snug pr-7">${escapeHTML(messages.join(" · "))}</div>`
-        : "";
+      const messages = cleanMessages(e);
+      const messagesHTML = messages
+        .map((m) => `<div class="mono text-[11px] text-ink-500 mt-0.5 break-words leading-snug pr-7">${escapeHTML(m)}</div>`)
+        .join("");
       const idAttr = e.id ? ` data-id="${escapeHTML(e.id)}"` : "";
       const badge  = badgeClass(e.type);
       li.innerHTML = `
