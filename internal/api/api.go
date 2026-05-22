@@ -361,11 +361,17 @@ func (a *API) logsCSVHandler(w http.ResponseWriter, r *http.Request) {
 	cw := csv.NewWriter(w)
 	cw.Write([]string{"timestamp", "type", "title", "message"})
 	for _, e := range entries {
-		if len(e.Message) == 0 {
+		var msgs []string
+		for _, m := range e.Message {
+			if strings.TrimSpace(m) != "" {
+				msgs = append(msgs, m)
+			}
+		}
+		if len(msgs) == 0 {
 			cw.Write([]string{e.Timestamp, e.Type, e.Title, ""})
 			continue
 		}
-		for _, m := range e.Message {
+		for _, m := range msgs {
 			cw.Write([]string{e.Timestamp, e.Type, e.Title, m})
 		}
 	}
